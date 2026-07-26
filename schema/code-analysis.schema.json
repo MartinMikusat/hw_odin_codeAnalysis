@@ -1,0 +1,42 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Odin code-analysis configuration",
+    "type": "object",
+    "properties": {
+        "odin_command": {
+            "type": "string"
+        },
+        "checker_args": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        },
+        "collections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "name",
+                    "path"
+                ],
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "path": {
+                        "type": "string"
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        "exclude_paths": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        }
+    },
+    "additionalProperties": false
+}

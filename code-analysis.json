@@ -1,0 +1,8 @@
+{
+    "$schema": "./schema/code-analysis.schema.json",
+    "collections": [],
+    "exclude_paths": [
+        ".git",
+        "build"
+    ]
+}
