@@ -20,6 +20,12 @@ The first implementation targets macOS on Apple Silicon and Odin `dev-2026-07a`.
 ODIN=/Users/martin/.local/share/odin/dev-2026-07a/odin ./build.sh
 ```
 
+Install the verified binary in `~/.local/bin`:
+
+```sh
+ODIN=/Users/martin/.local/share/odin/dev-2026-07a/odin ./install.sh
+```
+
 ## Test
 
 ```sh
@@ -31,6 +37,55 @@ ODIN=/Users/martin/.local/share/odin/dev-2026-07a/odin ./test.sh
 Run `build/hw-odin-analyze help` for the complete command list.
 
 Analysis commands emit JSON and do not change source files. Source positions use one-based lines and UTF-8 byte columns.
+
+The executable starts one daemon for each analysis root. The client and daemon
+exchange length-prefixed JSON through a Unix-domain socket. The daemon exits
+after 15 minutes without a request.
+
+FSEvents marks the index dirty after a saved file changes. The daemon flushes
+pending events and rebuilds the index before it executes the next request.
+
+### Examples
+
+```sh
+hw-odin-analyze --root /path/to/project outline src/main.odin
+hw-odin-analyze --root /path/to/project definition src/main.odin 42 9
+hw-odin-analyze --root /path/to/project references src/main.odin 42 9
+hw-odin-analyze --root /path/to/project rename src/main.odin 42 9 new_name
+hw-odin-analyze --root /path/to/project diagnostics --workspace
+hw-odin-analyze --root /path/to/project status
+hw-odin-analyze --root /path/to/project stop
+```
+
+`rename` returns a checked edit plan. It does not write source files.
+
+### Configuration
+
+Place `code-analysis.json` in the analysis root. The file can set the Odin
+command, checker arguments, collection roots, and excluded paths. See
+[`schema/code-analysis.schema.json`](schema/code-analysis.schema.json).
+
+### Current analysis boundary
+
+The engine parses saved files with the Odin compiler AST packages. It resolves
+package declarations, local declarations, imported package selectors, typed
+struct fields, references, and direct calls.
+
+Type inference currently uses declared source types. It does not execute the
+complete Odin checker. Complex `using`, polymorphic specialization, implicit
+selector, overload, and inferred-expression cases can return `Ambiguous` or
+`Unresolved`. Run `diagnostics` or `odin check` for compiler authority.
+
+## Performance
+
+Run `./benchmark.sh` to measure the local fixture. On an Apple Silicon
+development machine, version `0.1.0` measured:
+
+- Warm definition query: 2.3 ms mean across 100 runs.
+- Cold daemon startup and initial index: 15.6 ms mean across 10 runs.
+
+The values include process startup, socket transport, JSON encoding, and
+FSEvents synchronization.
 
 ## Reference implementation
 

@@ -263,6 +263,7 @@ run_daemon :: proc(root: string) {
 
 	idle_seconds := 0
 	for {
+		free_all(context.temp_allocator)
 		poll_descriptor := posix.pollfd {
 			fd = listener,
 			events = {.IN},
@@ -314,6 +315,7 @@ run_daemon :: proc(root: string) {
 			return
 		}
 
+		watcher.flush(&file_watcher)
 		if watcher.consume_dirty(&file_watcher) {
 			if !analysis.context_rebuild(&state) {
 				write_response(

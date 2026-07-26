@@ -3,6 +3,7 @@
     "collections": [],
     "exclude_paths": [
         ".git",
-        "build"
+        "build",
+        ".cache"
     ]
 }

@@ -34,6 +34,7 @@ run_diagnostics :: proc(
 	append(&command, "check")
 	append(&command, target)
 	append(&command, "-json-errors")
+	append(&command, "-no-entry-point")
 	for collection in state.config.collections {
 		collection_path := collection.path
 		if !filepath.is_abs(collection_path) {

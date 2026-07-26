@@ -120,3 +120,73 @@ references_and_calls :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(callers), 1)
 	testing.expect_value(t, callers[0].name, "run")
 }
+
+@(test)
+diagnostics_accept_valid_workspace :: proc(t: ^testing.T) {
+	state, ok := fixture_context()
+	testing.expect(t, ok)
+	if !ok {
+		return
+	}
+	defer analysis.context_destroy(&state)
+
+	diagnostics, diagnostics_ok := analysis.run_diagnostics(
+		&state,
+		state.root,
+		context.temp_allocator,
+	)
+	testing.expect(t, diagnostics_ok)
+	testing.expect_value(t, len(diagnostics), 0)
+}
+
+@(test)
+rename_plan_is_non_mutating_and_collision_checked :: proc(t: ^testing.T) {
+	state, ok := fixture_context()
+	testing.expect(t, ok)
+	if !ok {
+		return
+	}
+	defer analysis.context_destroy(&state)
+
+	testing.expect(t, analysis.rename_is_safe(&state, "main.odin", 9, 1, "welcome"))
+	testing.expect(t, !analysis.rename_is_safe(&state, "main.odin", 9, 1, "run"))
+	edits := analysis.rename_plan(
+		&state,
+		"main.odin",
+		9,
+		1,
+		"welcome",
+		context.temp_allocator,
+	)
+	testing.expect_value(t, len(edits), 2)
+}
+
+@(test)
+selector_completion_uses_receiver_type :: proc(t: ^testing.T) {
+	state, ok := fixture_context()
+	testing.expect(t, ok)
+	if !ok {
+		return
+	}
+	defer analysis.context_destroy(&state)
+
+	fields := analysis.completion(
+		&state,
+		"main.odin",
+		10,
+		20,
+		context.temp_allocator,
+	)
+	testing.expect_value(t, len(fields), 1)
+	testing.expect_value(t, fields[0].name, "name")
+
+	imports := analysis.completion(
+		&state,
+		"main.odin",
+		16,
+		13,
+		context.temp_allocator,
+	)
+	testing.expect_value(t, len(imports), 1)
+	testing.expect_value(t, imports[0].name, "ping")
+}

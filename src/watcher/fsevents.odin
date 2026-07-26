@@ -61,6 +61,7 @@ foreign CoreServices {
 		queue: Dispatch_Queue,
 	) ---
 	FSEventStreamStart :: proc(stream: FSEvent_Stream) -> bool ---
+	FSEventStreamFlushSync :: proc(stream: FSEvent_Stream) ---
 	FSEventStreamStop :: proc(stream: FSEvent_Stream) ---
 	FSEventStreamInvalidate :: proc(stream: FSEvent_Stream) ---
 	FSEventStreamRelease :: proc(stream: FSEvent_Stream) ---
@@ -167,4 +168,11 @@ consume_dirty :: proc(watcher: ^Watcher) -> bool {
 		return false
 	}
 	return sync.atomic_exchange(&watcher.dirty, 0) != 0
+}
+
+flush :: proc(watcher: ^Watcher) {
+	if watcher == nil || watcher.stream == nil {
+		return
+	}
+	FSEventStreamFlushSync(watcher.stream)
 }

@@ -6,3 +6,6 @@ odin_command="${ODIN:-odin}"
   -collection:code_analysis=src \
   -define:ODIN_TEST_THREADS=1 \
   -strict-style
+
+ODIN="$odin_command" ./build.sh
+./integration-test.sh

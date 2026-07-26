@@ -8,7 +8,7 @@ import "core:sys/posix"
 
 import "code_analysis:analysis"
 
-VERSION :: "0.1.0-dev"
+VERSION :: "0.1.0"
 
 Request :: struct {
 	version:   int,
@@ -178,6 +178,18 @@ execute :: proc(
 			return Response{error = "LINE and COLUMN must be positive integers"}
 		}
 		path, _, _ := analysis.query_path(state, arguments[0], context.temp_allocator)
+		if !analysis.valid_identifier(arguments[3]) {
+			return Response{error = "NEW_NAME must be a valid Odin identifier"}
+		}
+		if !analysis.rename_is_safe(
+			state,
+			path,
+			line,
+			column,
+			arguments[3],
+		) {
+			return Response{error = "rename would collide with an existing declaration"}
+		}
 		payload, ok = encode(
 			analysis.rename_plan(
 				state,
