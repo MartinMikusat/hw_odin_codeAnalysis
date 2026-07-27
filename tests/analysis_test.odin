@@ -2,9 +2,11 @@ package tests
 
 import "core:os"
 import "core:path/filepath"
+import "core:strings"
 import "core:testing"
 
 import "code_analysis:analysis"
+import "code_analysis:service"
 import "code_analysis:watcher"
 
 INITIAL_MAIN_SOURCE :: `package fixture
@@ -67,6 +69,18 @@ fixture_context :: proc() -> (state: analysis.Analysis_Context, ok: bool) {
 		"tests/fixtures/workspace",
 		context.temp_allocator,
 	)
+	if root_error != nil {
+		return
+	}
+	ok = analysis.context_init(&state, root)
+	return
+}
+
+fixture_context_at :: proc(path: string) -> (
+	state: analysis.Analysis_Context,
+	ok: bool,
+) {
+	root, root_error := os.get_absolute_path(path, context.temp_allocator)
 	if root_error != nil {
 		return
 	}
@@ -246,6 +260,26 @@ selector_completion_uses_receiver_type :: proc(t: ^testing.T) {
 	)
 	testing.expect_value(t, len(imports), 1)
 	testing.expect_value(t, imports[0].name, "ping")
+
+	unqualified := analysis.completion(
+		&state,
+		"main.odin",
+		15,
+		1,
+		context.temp_allocator,
+	)
+	found_local := false
+	found_explicit_import_member := false
+	for symbol in unqualified {
+		if symbol.name == "value" {
+			found_local = true
+		}
+		if symbol.name == "ping" {
+			found_explicit_import_member = true
+		}
+	}
+	testing.expect(t, found_local)
+	testing.expect(t, !found_explicit_import_member)
 }
 
 @(test)
@@ -336,4 +370,438 @@ dirty_watcher_can_be_rearmed :: proc(t: ^testing.T) {
 	testing.expect(t, !watcher.consume_dirty(&value))
 	watcher.mark_dirty(&value)
 	testing.expect(t, watcher.consume_dirty(&value))
+}
+
+@(test)
+unimported_symbols_remain_unresolved :: proc(t: ^testing.T) {
+	state, ok := fixture_context_at("tests/fixtures/scopes")
+	testing.expect(t, ok)
+	if !ok {
+		return
+	}
+	defer analysis.context_destroy(&state)
+
+	location := analysis.location_for_position(
+		&state,
+		"unimported/main.odin",
+		4,
+		1,
+		context.temp_allocator,
+	)
+	testing.expect_value(t, location.resolution, analysis.Resolution_Kind.Unresolved)
+
+	type_location := analysis.type_definition_for_position(
+		&state,
+		"unimported/main.odin",
+		7,
+		1,
+		context.temp_allocator,
+	)
+	testing.expect_value(
+		t,
+		type_location.resolution,
+		analysis.Resolution_Kind.Unresolved,
+	)
+
+	hidden_references := analysis.references(
+		&state,
+		"hidden/hidden.odin",
+		3,
+		1,
+		context.temp_allocator,
+	)
+	testing.expect_value(t, len(hidden_references), 1)
+	hidden_callers := analysis.callers(
+		&state,
+		"hidden/hidden.odin",
+		3,
+		1,
+		context.temp_allocator,
+	)
+	testing.expect_value(t, len(hidden_callers), 0)
+
+	rename_response := service.execute(
+		&state,
+		service.Request {
+			version = 1,
+			command = "rename",
+			arguments = []string{
+				"unimported/main.odin",
+				"4",
+				"1",
+				"renamed",
+			},
+			compact = true,
+		},
+		allocator = context.temp_allocator,
+	)
+	testing.expect_value(t, rename_response.error, "rename target is unresolved")
+}
+
+@(test)
+using_imports_follow_scope_and_ambiguity :: proc(t: ^testing.T) {
+	state, ok := fixture_context_at("tests/fixtures/scopes")
+	testing.expect(t, ok)
+	if !ok {
+		return
+	}
+	defer analysis.context_destroy(&state)
+
+	exact := analysis.location_for_position(
+		&state,
+		"exact/main.odin",
+		6,
+		1,
+		context.temp_allocator,
+	)
+	testing.expect_value(t, exact.resolution, analysis.Resolution_Kind.Exact)
+	testing.expect_value(t, exact.locations[0].path, "using_one/one.odin")
+	using_import_found := false
+	for import_value in state.imports {
+		if import_value.path == "exact/main.odin" && import_value.is_using {
+			using_import_found = true
+			break
+		}
+	}
+	testing.expect(t, using_import_found)
+
+	visible_type := analysis.type_definition_for_position(
+		&state,
+		"exact/main.odin",
+		9,
+		1,
+		context.temp_allocator,
+	)
+	testing.expect_value(
+		t,
+		visible_type.resolution,
+		analysis.Resolution_Kind.Exact,
+	)
+	testing.expect_value(t, visible_type.locations[0].name, "Visible_Type")
+
+	ambiguous := analysis.location_for_position(
+		&state,
+		"ambiguous/main.odin",
+		7,
+		1,
+		context.temp_allocator,
+	)
+	testing.expect_value(
+		t,
+		ambiguous.resolution,
+		analysis.Resolution_Kind.Ambiguous,
+	)
+	testing.expect_value(t, len(ambiguous.locations), 2)
+
+	shadowed := analysis.location_for_position(
+		&state,
+		"shadow/main.odin",
+		9,
+		1,
+		context.temp_allocator,
+	)
+	testing.expect_value(t, shadowed.resolution, analysis.Resolution_Kind.Exact)
+	testing.expect_value(t, shadowed.locations[0].path, "shadow/main.odin")
+
+	builtin_shadow := analysis.location_for_position(
+		&state,
+		"shadow/main.odin",
+		10,
+		1,
+		context.temp_allocator,
+	)
+	testing.expect_value(
+		t,
+		builtin_shadow.resolution,
+		analysis.Resolution_Kind.Exact,
+	)
+	testing.expect_value(
+		t,
+		builtin_shadow.locations[0].path,
+		"shadow/main.odin",
+	)
+
+	qualified := analysis.location_for_position(
+		&state,
+		"qualified/main.odin",
+		6,
+		5,
+		context.temp_allocator,
+	)
+	testing.expect_value(t, qualified.resolution, analysis.Resolution_Kind.Exact)
+	testing.expect_value(t, qualified.locations[0].path, "using_one/one.odin")
+
+	qualified_type := analysis.type_definition_for_position(
+		&state,
+		"qualified/main.odin",
+		9,
+		1,
+		context.temp_allocator,
+	)
+	testing.expect_value(
+		t,
+		qualified_type.resolution,
+		analysis.Resolution_Kind.Exact,
+	)
+	testing.expect_value(
+		t,
+		qualified_type.locations[0].name,
+		"Visible_Type",
+	)
+
+	unknown := analysis.location_for_position(
+		&state,
+		"unknown/main.odin",
+		6,
+		9,
+		context.temp_allocator,
+	)
+	testing.expect_value(t, unknown.resolution, analysis.Resolution_Kind.Unresolved)
+}
+
+@(test)
+builtins_are_navigable_and_read_only :: proc(t: ^testing.T) {
+	state, ok := fixture_context_at("tests/fixtures/scopes")
+	testing.expect(t, ok)
+	if !ok {
+		return
+	}
+	defer analysis.context_destroy(&state)
+
+	location := analysis.location_for_position(
+		&state,
+		"builtin/main.odin",
+		4,
+		8,
+		context.temp_allocator,
+	)
+	testing.expect_value(t, location.resolution, analysis.Resolution_Kind.Exact)
+	if len(location.locations) != 1 {
+		return
+	}
+	testing.expect(t, filepath.is_abs(location.locations[0].path))
+	testing.expect(
+		t,
+		strings.has_suffix(
+			location.locations[0].path,
+			"/base/builtin/builtin.odin",
+		),
+	)
+
+	type_location := analysis.type_definition_for_position(
+		&state,
+		"builtin/main.odin",
+		7,
+		1,
+		context.temp_allocator,
+	)
+	testing.expect_value(
+		t,
+		type_location.resolution,
+		analysis.Resolution_Kind.Exact,
+	)
+	testing.expect_value(t, type_location.locations[0].name, "int")
+
+	rename_response := service.execute(
+		&state,
+		service.Request {
+			version = 1,
+			command = "rename",
+			arguments = []string{
+				"builtin/main.odin",
+				"4",
+				"8",
+				"length",
+			},
+			compact = true,
+		},
+	)
+	testing.expect_value(
+		t,
+		rename_response.error,
+		"rename target is a read-only built-in",
+	)
+}
+
+@(test)
+completion_respects_package_visibility :: proc(t: ^testing.T) {
+	state, ok := fixture_context_at("tests/fixtures/scopes")
+	testing.expect(t, ok)
+	if !ok {
+		return
+	}
+	defer analysis.context_destroy(&state)
+
+	using_values := analysis.completion(
+		&state,
+		"exact/main.odin",
+		6,
+		1,
+		context.temp_allocator,
+	)
+	found_using := false
+	found_builtin := false
+	found_unrelated := false
+	for symbol in using_values {
+		if symbol.name == "available" && symbol.path == "using_one/one.odin" {
+			found_using = true
+		}
+		if symbol.name == "len" && analysis.symbol_is_builtin(&state, symbol) {
+			found_builtin = true
+		}
+		if symbol.name == "hidden" {
+			found_unrelated = true
+		}
+	}
+	testing.expect(t, found_using)
+	testing.expect(t, found_builtin)
+	testing.expect(t, !found_unrelated)
+
+	explicit_values := analysis.completion(
+		&state,
+		"qualified/main.odin",
+		6,
+		1,
+		context.temp_allocator,
+	)
+	found_explicit_member := false
+	for symbol in explicit_values {
+		if symbol.name == "available" {
+			found_explicit_member = true
+			break
+		}
+	}
+	testing.expect(t, !found_explicit_member)
+
+	shadowed_values := analysis.completion(
+		&state,
+		"shadow/main.odin",
+		9,
+		1,
+		context.temp_allocator,
+	)
+	available_path := ""
+	len_path := ""
+	for symbol in shadowed_values {
+		if symbol.name == "available" {
+			available_path = symbol.path
+		}
+		if symbol.name == "len" {
+			len_path = symbol.path
+		}
+	}
+	testing.expect_value(t, available_path, "shadow/main.odin")
+	testing.expect_value(t, len_path, "shadow/main.odin")
+}
+
+@(test)
+external_dependencies_are_followed_once :: proc(t: ^testing.T) {
+	state, ok := fixture_context_at("tests/fixtures/external_app")
+	testing.expect(t, ok)
+	if !ok {
+		return
+	}
+	defer analysis.context_destroy(&state)
+
+	location := analysis.location_for_position(
+		&state,
+		"main.odin",
+		6,
+		1,
+		context.temp_allocator,
+	)
+	testing.expect_value(t, location.resolution, analysis.Resolution_Kind.Exact)
+	testing.expect(t, filepath.is_abs(location.locations[0].path))
+	testing.expect(
+		t,
+		strings.has_suffix(
+			location.locations[0].path,
+			"/external_dependency/dependency.odin",
+		),
+	)
+
+	leaf := analysis.search(&state, "leaf_name", context.temp_allocator)
+	testing.expect_value(t, len(leaf), 1)
+	testing.expect(t, filepath.is_abs(leaf[0].path))
+	testing.expect(t, len(state.watch_roots) >= 3)
+
+	completion := analysis.completion(
+		&state,
+		"main.odin",
+		6,
+		1,
+		context.temp_allocator,
+	)
+	found_direct_dependency := false
+	found_transitive_dependency := false
+	for symbol in completion {
+		if symbol.name == "dependency_name" {
+			found_direct_dependency = true
+		}
+		if symbol.name == "leaf_name" {
+			found_transitive_dependency = true
+		}
+	}
+	testing.expect(t, found_direct_dependency)
+	testing.expect(t, !found_transitive_dependency)
+
+	rename_response := service.execute(
+		&state,
+		service.Request {
+			version = 1,
+			command = "rename",
+			arguments = []string{
+				"main.odin",
+				"6",
+				"1",
+				"renamed_dependency",
+			},
+			compact = true,
+		},
+	)
+	testing.expect_value(
+		t,
+		rename_response.error,
+		"rename target is in a read-only dependency",
+	)
+	testing.expect_value(t, rename_response.payload, "")
+}
+
+@(test)
+configured_collection_symbols_remain_renameable :: proc(t: ^testing.T) {
+	state, ok := fixture_context_at("tests/fixtures/configured_app")
+	testing.expect(t, ok)
+	if !ok {
+		return
+	}
+	defer analysis.context_destroy(&state)
+
+	rename_response := service.execute(
+		&state,
+		service.Request {
+			version = 1,
+			command = "rename",
+			arguments = []string{
+				"main.odin",
+				"6",
+				"1",
+				"renamed_configured",
+			},
+			compact = true,
+		},
+		allocator = context.temp_allocator,
+	)
+	testing.expect(t, rename_response.ok)
+	testing.expect_value(t, rename_response.error, "")
+	testing.expect(t, strings.contains(rename_response.payload, "renamed_configured"))
+
+	edits := analysis.rename_plan(
+		&state,
+		"main.odin",
+		6,
+		1,
+		"renamed_configured",
+		context.temp_allocator,
+	)
+	testing.expect_value(t, len(edits), 2)
 }

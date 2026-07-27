@@ -164,32 +164,16 @@ ensure_daemon :: proc(root: string, paths: transport.Runtime_Paths) -> bool {
 	return start_daemon(root, paths)
 }
 
-watch_paths :: proc(
-	state: ^analysis.Analysis_Context,
-	allocator := context.allocator,
-) -> []string {
-	paths := make([]string, 1 + len(state.config.collections), allocator)
-	paths[0] = strings.clone(state.root, allocator)
-	for collection, index in state.config.collections {
-		path := collection.path
-		if !filepath.is_abs(path) {
-			path, _ = filepath.join({state.root, path}, context.temp_allocator)
-		}
-		absolute, absolute_error := os.get_absolute_path(path, allocator)
-		if absolute_error != nil {
-			paths[index + 1] = strings.clone(path, allocator)
-		} else {
-			paths[index + 1] = absolute
+watch_roots_equal :: proc(a, b: []string) -> bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for value, index in a {
+		if value != b[index] {
+			return false
 		}
 	}
-	return paths
-}
-
-destroy_watch_paths :: proc(paths: []string, allocator := context.allocator) {
-	for path in paths {
-		delete(path, allocator)
-	}
-	delete(paths, allocator)
+	return true
 }
 
 write_response :: proc(socket: posix.FD, response: service.Response) -> bool {
@@ -252,14 +236,14 @@ run_daemon :: proc(root: string) {
 	}
 	defer analysis.context_destroy(&state)
 
-	file_watcher: watcher.Watcher
-	roots := watch_paths(&state)
-	defer destroy_watch_paths(roots)
-	if !watcher.start(&file_watcher, roots) {
+	file_watchers: [2]watcher.Watcher
+	active_watcher := 0
+	if !watcher.start(&file_watchers[active_watcher], state.watch_roots[:]) {
 		fmt.eprintln("daemon: failed to start FSEvents")
 		os.exit(1)
 	}
-	defer watcher.stop(&file_watcher)
+	defer watcher.stop(&file_watchers[0])
+	defer watcher.stop(&file_watchers[1])
 
 	idle_seconds := 0
 	for {
@@ -315,16 +299,45 @@ run_daemon :: proc(root: string) {
 			return
 		}
 
-		watcher.flush(&file_watcher)
-		if watcher.consume_dirty(&file_watcher) {
-			if !analysis.context_rebuild(&state) {
-				watcher.mark_dirty(&file_watcher)
+		current_watcher := &file_watchers[active_watcher]
+		watcher.flush(current_watcher)
+		if watcher.consume_dirty(current_watcher) {
+			candidate: analysis.Analysis_Context
+			if !analysis.context_build_candidate(&state, &candidate) {
+				watcher.mark_dirty(current_watcher)
 				write_response(
 					client,
 					service.Response{error = "failed to rebuild the analysis index"},
 				)
 				posix.close(client)
 				continue
+			}
+
+			if watch_roots_equal(
+				state.watch_roots[:],
+				candidate.watch_roots[:],
+			) {
+				analysis.context_publish_candidate(&state, &candidate)
+			} else {
+				replacement_index := 1 - active_watcher
+				replacement := &file_watchers[replacement_index]
+				if !watcher.start(replacement, candidate.watch_roots[:]) {
+					analysis.context_destroy(&candidate)
+					watcher.mark_dirty(current_watcher)
+					write_response(
+						client,
+						service.Response{
+							error = "failed to watch the rebuilt analysis index",
+						},
+					)
+					posix.close(client)
+					continue
+				}
+
+				watcher.stop(current_watcher)
+				analysis.context_publish_candidate(&state, &candidate)
+				active_watcher = replacement_index
+				watcher.mark_dirty(replacement)
 			}
 		}
 

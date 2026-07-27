@@ -67,6 +67,7 @@ Import :: struct {
 	alias:        string,
 	import_path:  string,
 	resolved_path: string,
+	is_using:     bool,
 	range:        Source_Range,
 }
 

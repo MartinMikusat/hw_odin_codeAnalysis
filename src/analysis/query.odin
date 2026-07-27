@@ -72,15 +72,13 @@ location_for_position :: proc(
 	}
 
 	if occurrence, ok := occurrence_at(state, path, line, column); ok {
-		values := make([dynamic]Symbol, allocator)
-		for symbol in state.symbols {
-			if symbol.name == occurrence.name {
-				append(&values, symbol)
-			}
+		values := visible_candidates(state, occurrence^, allocator)
+		if len(values) == 1 {
+			return Location_Result{resolution = .Exact, locations = values}
 		}
-		if len(values) > 0 {
+		if len(values) > 1 {
 			slice.sort_by(values[:], symbol_less)
-			return Location_Result{resolution = .Ambiguous, locations = values[:]}
+			return Location_Result{resolution = .Ambiguous, locations = values}
 		}
 	}
 	return Location_Result{resolution = .Unresolved}
@@ -112,13 +110,53 @@ type_definition_for_position :: proc(
 	for candidate in state.symbols {
 		if is_type_symbol(candidate) &&
 		   candidate.package_directory == symbol.package_directory &&
+		   !symbol_is_builtin(state, candidate) &&
 		   contains_identifier(symbol.detail, candidate.name) {
 			append(&values, candidate)
 		}
 	}
 	if len(values) == 0 {
 		for candidate in state.symbols {
-			if is_type_symbol(candidate) &&
+			if !is_type_symbol(candidate) ||
+			   symbol_is_builtin(state, candidate) {
+				continue
+			}
+			for import_value in state.imports {
+				qualified_name := strings.join(
+					{import_value.alias, ".", candidate.name},
+					"",
+					context.temp_allocator,
+				)
+				if import_value.path == symbol.path &&
+				   !import_value.is_using &&
+				   import_exposes_symbol(state, import_value, candidate) &&
+				   strings.contains(symbol.detail, qualified_name) {
+					append(&values, candidate)
+					break
+				}
+			}
+		}
+	}
+	if len(values) == 0 {
+		for candidate in state.symbols {
+			if !is_type_symbol(candidate) ||
+			   symbol_is_builtin(state, candidate) ||
+			   !contains_identifier(symbol.detail, candidate.name) {
+				continue
+			}
+			for import_value in state.imports {
+				if import_value.path == symbol.path &&
+				   import_value.is_using &&
+				   import_exposes_symbol(state, import_value, candidate) {
+					append(&values, candidate)
+					break
+				}
+			}
+		}
+	}
+	if len(values) == 0 {
+		for candidate in state.symbols {
+			if symbol_is_builtin(state, candidate) &&
 			   contains_identifier(symbol.detail, candidate.name) {
 				append(&values, candidate)
 			}
@@ -330,6 +368,20 @@ imports_for_file :: proc(
 	return result[:]
 }
 
+append_completion_candidate :: proc(
+	result: ^[dynamic]Symbol,
+	seen: ^map[string]bool,
+	symbol: Symbol,
+	prefix: string,
+) {
+	if seen^[symbol.name] ||
+	   prefix != "" && !strings.has_prefix(symbol.name, prefix) {
+		return
+	}
+	seen^[symbol.name] = true
+	append(result, symbol)
+}
+
 completion :: proc(
 	state: ^Analysis_Context,
 	path: string,
@@ -339,13 +391,16 @@ completion :: proc(
 	prefix := ""
 	selector_base := ""
 	file_directory := ""
+	position_offset := max(int)
+	file_found := false
 	for file in state.files {
 		if file.relative_path != path || line <= 0 {
 			continue
 		}
+		file_found = true
 		file_directory = file.package_directory
-		offset := offset_for_position(file.source, line, column)
-		start := offset
+		position_offset = offset_for_position(file.source, line, column)
+		start := position_offset
 		for start > 0 {
 			value := file.source[start - 1]
 			if !(value == '_' || value >= 'a' && value <= 'z' ||
@@ -354,7 +409,7 @@ completion :: proc(
 			}
 			start -= 1
 		}
-		prefix = file.source[start:offset]
+		prefix = file.source[start:position_offset]
 		if start > 0 && file.source[start - 1] == '.' {
 			base_end := start - 1
 			base_start := base_end
@@ -364,6 +419,9 @@ completion :: proc(
 			selector_base = file.source[base_start:base_end]
 		}
 		break
+	}
+	if !file_found {
+		return nil
 	}
 	result := make([dynamic]Symbol, allocator)
 	seen := make(map[string]bool, context.temp_allocator)
@@ -390,13 +448,6 @@ completion :: proc(
 
 		base_symbol := Symbol_ID(-1)
 		best_offset := -1
-		position_offset := max(int)
-		for file in state.files {
-			if file.relative_path == path {
-				position_offset = offset_for_position(file.source, line, column)
-				break
-			}
-		}
 		for occurrence in state.occurrences {
 			if occurrence.path == path &&
 			   occurrence.name == selector_base &&
@@ -431,14 +482,54 @@ completion :: proc(
 		return result[:]
 	}
 
+	if procedure, found := enclosing_procedure(
+		state,
+		path,
+		position_offset,
+	); found {
+		for index := len(state.symbols) - 1; index >= 0; index -= 1 {
+			symbol := state.symbols[index]
+			if symbol.is_global ||
+			   symbol.kind == .Field ||
+			   symbol.path != path ||
+			   symbol.range.start.offset < procedure.extent.start.offset ||
+			   symbol.range.start.offset > position_offset {
+				continue
+			}
+			append_completion_candidate(&result, &seen, symbol, prefix)
+		}
+	}
+
 	for symbol in state.symbols {
-		if seen[symbol.name] || prefix != "" && !strings.has_prefix(symbol.name, prefix) {
+		if !symbol.is_global ||
+		   symbol_is_builtin(state, symbol) ||
+		   symbol.package_directory != file_directory {
 			continue
 		}
-		if symbol.is_global || symbol.path == path &&
-		   symbol.range.start.line <= line {
-			seen[symbol.name] = true
-			append(&result, symbol)
+		append_completion_candidate(&result, &seen, symbol, prefix)
+	}
+
+	for import_value in state.imports {
+		if import_value.path != path || !import_value.is_using {
+			continue
+		}
+		for file in state.files {
+			if filepath.dir(file.path) != import_value.resolved_path {
+				continue
+			}
+			for symbol in state.symbols {
+				if symbol.path == file.relative_path &&
+				   symbol.is_global &&
+				   !symbol_is_builtin(state, symbol) {
+					append_completion_candidate(&result, &seen, symbol, prefix)
+				}
+			}
+		}
+	}
+
+	for symbol in state.symbols {
+		if symbol.is_global && symbol_is_builtin(state, symbol) {
+			append_completion_candidate(&result, &seen, symbol, prefix)
 		}
 	}
 	slice.sort_by(result[:], symbol_less)

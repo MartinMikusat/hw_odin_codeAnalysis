@@ -20,4 +20,5 @@ The project imports tokenizer, parser, and AST packages distributed with the Odi
 - License: BSD 3-Clause
 - License location: the `LICENSE` file in the installed Odin distribution
 
-The compiler distribution is not bundled with this project.
+The compiler distribution is not bundled with this project. The installed
+analyzer reads its pinned `base/builtin/builtin.odin` source at runtime.

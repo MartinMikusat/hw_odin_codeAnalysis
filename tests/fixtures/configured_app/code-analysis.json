@@ -1,0 +1,8 @@
+{
+    "collections": [
+        {
+            "name": "configured_dependency",
+            "path": "../configured_dependency"
+        }
+    ]
+}

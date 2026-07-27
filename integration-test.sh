@@ -5,6 +5,8 @@ root="tests/fixtures/workspace"
 analyzer=(./build/hw-odin-analyze --root "$root" --compact)
 failure_root=""
 failure_analyzer=()
+dependency_root=""
+dependency_analyzer=()
 
 cleanup() {
   "${analyzer[@]}" stop >/dev/null 2>&1 || true
@@ -12,6 +14,10 @@ cleanup() {
     "${failure_analyzer[@]}" stop >/dev/null 2>&1 || true
     chmod 600 "$failure_root/unreadable.odin" >/dev/null 2>&1 || true
     rm -rf -- "$failure_root"
+  fi
+  if [[ -n "$dependency_root" ]]; then
+    "${dependency_analyzer[@]}" stop >/dev/null 2>&1 || true
+    rm -rf -- "$dependency_root"
   fi
 }
 trap cleanup EXIT
@@ -98,3 +104,75 @@ failure_generation_after="$(
 
 failure_search="$("${failure_analyzer[@]}" search added)"
 [[ "$failure_search" == *'"name":"added"'* ]]
+
+dependency_root="$(mktemp -d "${TMPDIR:-/tmp}/hw-odin-dependencies-XXXXXX")"
+mkdir -p "$dependency_root/app" "$dependency_root/dep_a" "$dependency_root/dep_b"
+dependency_analyzer=(
+  ./build/hw-odin-analyze
+  --root "$dependency_root/app"
+  --compact
+)
+printf 'package app\n\nusing import "../dep_a"\n\nrun :: proc() {\ndep_a_name()\n}\n' \
+  >"$dependency_root/app/main.odin"
+printf 'package dep_a\n\ndep_a_name :: proc() {}\n' \
+  >"$dependency_root/dep_a/dep.odin"
+printf 'package dep_b\n\ndep_b_name :: proc() {}\n' \
+  >"$dependency_root/dep_b/dep.odin"
+
+dependency_status="$("${dependency_analyzer[@]}" status)"
+dependency_generation="$(
+  printf '%s' "$dependency_status" |
+    sed -E 's/.*"generation":([0-9]+).*/\1/'
+)"
+dependency_definition="$(
+  "${dependency_analyzer[@]}" definition main.odin 6 1
+)"
+[[ "$dependency_definition" == *'"name":"dep_a_name"'* ]]
+
+printf 'package app\n\nusing import "../dep_b"\n\nrun :: proc() {\ndep_b_name()\n}\n' \
+  >"$dependency_root/app/main.odin"
+dependency_replaced=false
+for _ in {1..100}; do
+  dependency_definition="$(
+    "${dependency_analyzer[@]}" definition main.odin 6 1
+  )"
+  if [[ "$dependency_definition" == *'"name":"dep_b_name"'* ]]; then
+    dependency_replaced=true
+    break
+  fi
+  sleep 0.02
+done
+if [[ "$dependency_replaced" != true ]]; then
+  printf 'expected the rebuilt index to use the new dependency\n' >&2
+  exit 1
+fi
+
+dependency_validation_status="$("${dependency_analyzer[@]}" status)"
+dependency_validation_generation="$(
+  printf '%s' "$dependency_validation_status" |
+    sed -E 's/.*"generation":([0-9]+).*/\1/'
+)"
+((dependency_validation_generation == dependency_generation + 2))
+
+printf 'package dep_b\n\ndep_b_name :: proc() {}\nwatched_name :: proc() {}\n' \
+  >"$dependency_root/dep_b/dep.odin"
+dependency_watched=false
+for _ in {1..100}; do
+  dependency_search="$("${dependency_analyzer[@]}" search watched_name)"
+  if [[ "$dependency_search" == *'"name":"watched_name"'* ]]; then
+    dependency_watched=true
+    break
+  fi
+  sleep 0.02
+done
+if [[ "$dependency_watched" != true ]]; then
+  printf 'expected the replacement watcher to observe the dependency\n' >&2
+  exit 1
+fi
+
+dependency_status="$("${dependency_analyzer[@]}" status)"
+dependency_generation_after="$(
+  printf '%s' "$dependency_status" |
+    sed -E 's/.*"generation":([0-9]+).*/\1/'
+)"
+((dependency_generation_after > dependency_generation))

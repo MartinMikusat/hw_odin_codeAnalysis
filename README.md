@@ -68,21 +68,37 @@ command, checker arguments, collection roots, and excluded paths. See
 ### Current analysis boundary
 
 The engine parses saved files with the Odin compiler AST packages. It resolves
-package declarations, local declarations, imported package selectors, typed
-struct fields, references, and direct calls.
+package declarations, local declarations, imported package selectors, using
+imports, compiler built-ins, typed struct fields, references, and direct calls.
+
+The index follows relative imports, configured collections, and the pinned
+`base`, `core`, and `vendor` collections. Import cycles do not duplicate files.
+Result paths outside the analysis root are absolute.
+
+Imported packages contribute declarations and further imports. The analyzer
+collects reference occurrences only in the analysis root and configured
+collection roots.
+
+Automatically followed dependencies are read-only. They support navigation, and
+completion exposes only symbols made visible by selectors or `using import`.
+Configured collection roots remain writable and contribute complete references.
+
+Built-in definitions point to `base/builtin/builtin.odin` in the pinned compiler
+distribution. Keep that compiler distribution available after installation.
 
 Type inference currently uses declared source types. It does not execute the
-complete Odin checker. Complex `using`, polymorphic specialization, implicit
-selector, overload, and inferred-expression cases can return `Ambiguous` or
-`Unresolved`. Run `diagnostics` or `odin check` for compiler authority.
+complete Odin checker. General `using` statements, conditional-file evaluation,
+polymorphic specialization, implicit selectors, overloads, and inferred
+expressions can return `Ambiguous` or `Unresolved`. Run `diagnostics` or
+`odin check` for compiler authority.
 
 ## Performance
 
 Run `./benchmark.sh` to measure the local fixture. On an Apple Silicon
 development machine, version `0.1.0` measured:
 
-- Warm definition query: 2.3 ms mean across 100 runs.
-- Cold daemon startup and initial index: 15.6 ms mean across 10 runs.
+- Warm definition query: 2.4 ms mean across 100 runs.
+- Cold daemon startup and initial index: 16.0 ms mean across 10 runs.
 
 The values include process startup, socket transport, JSON encoding, and
 FSEvents synchronization.

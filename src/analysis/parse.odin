@@ -6,6 +6,7 @@ import "core:odin/ast"
 import parser "core:odin/parser"
 import "core:os"
 import "core:path/filepath"
+import "core:slice"
 import "core:strings"
 
 Collect_State :: struct {
@@ -17,6 +18,7 @@ Collect_State :: struct {
 	call_offsets:   map[int]bool,
 	field_kinds:    map[^ast.Field]Symbol_Kind,
 	field_owners:   map[^ast.Field]string,
+	collect_occurrences: bool,
 }
 
 position_from_ast :: proc(line, column, offset: int) -> Source_Position {
@@ -59,6 +61,67 @@ relative_path :: proc(root, path: string, allocator := context.allocator) -> str
 	return value
 }
 
+path_is_within :: proc(root, path: string) -> bool {
+	if root == path {
+		return true
+	}
+	if !strings.has_prefix(path, root) || len(path) <= len(root) {
+		return false
+	}
+	return root[len(root) - 1] == '/' || path[len(root)] == '/'
+}
+
+normalized_path :: proc(path: string, allocator := context.allocator) -> string {
+	result, path_error := os.get_absolute_path(path, allocator)
+	if path_error == nil {
+		return result
+	}
+	return strings.clone(path, allocator)
+}
+
+published_path :: proc(
+	state: ^Analysis_Context,
+	path: string,
+	allocator := context.allocator,
+) -> string {
+	if path_is_within(state.root, path) {
+		return relative_path(state.root, path, allocator)
+	}
+	return strings.clone(path, allocator)
+}
+
+add_watch_root :: proc(state: ^Analysis_Context, path: string) {
+	normalized := normalized_path(path)
+	for root in state.watch_roots {
+		if path_is_within(root, normalized) {
+			delete(normalized)
+			return
+		}
+	}
+	for index := len(state.watch_roots) - 1; index >= 0; index -= 1 {
+		if path_is_within(normalized, state.watch_roots[index]) {
+			delete(state.watch_roots[index])
+			unordered_remove(&state.watch_roots, index)
+		}
+	}
+	append(&state.watch_roots, normalized)
+}
+
+dependency_watch_root :: proc(directory: string) -> string {
+	collection_names := [3]string{"base", "core", "vendor"}
+	for collection_name in collection_names {
+		root, _ := filepath.join(
+			{ODIN_ROOT, collection_name},
+			context.temp_allocator,
+		)
+		root = normalized_path(root, context.temp_allocator)
+		if path_is_within(root, directory) {
+			return root
+		}
+	}
+	return directory
+}
+
 should_exclude :: proc(state: ^Analysis_Context, path: string) -> bool {
 	for excluded in state.config.exclude_paths {
 		if excluded == "" {
@@ -73,6 +136,76 @@ should_exclude :: proc(state: ^Analysis_Context, path: string) -> bool {
 	return false
 }
 
+scan_recursive_root :: proc(
+	state: ^Analysis_Context,
+	root: string,
+	visited_files: ^map[string]bool,
+) -> bool {
+	add_watch_root(state, root)
+	walker := os.walker_create(root)
+	for info in os.walker_walk(&walker) {
+		if info.type == .Directory {
+			if should_exclude(state, info.fullpath) {
+				os.walker_skip_dir(&walker)
+			}
+			continue
+		}
+		if info.type != .Regular || !strings.has_suffix(info.name, ".odin") {
+			continue
+		}
+		if should_exclude(state, info.fullpath) {
+			continue
+		}
+		path := normalized_path(info.fullpath, context.temp_allocator)
+		if visited_files^[path] {
+			continue
+		}
+		visited_files^[path] = true
+		if !parse_file_into_context(state, path) {
+			os.walker_destroy(&walker)
+			return false
+		}
+	}
+	os.walker_destroy(&walker)
+	return true
+}
+
+scan_package_directory :: proc(
+	state: ^Analysis_Context,
+	directory: string,
+	visited_files: ^map[string]bool,
+) -> bool {
+	entries, read_error := os.read_all_directory_by_path(
+		directory,
+		context.temp_allocator,
+	)
+	if read_error != nil {
+		return false
+	}
+	slice.sort_by(
+		entries,
+		proc(a, b: os.File_Info) -> bool {
+			return strings.compare(a.fullpath, b.fullpath) < 0
+		},
+	)
+	for info in entries {
+		if info.type != .Regular ||
+		   !strings.has_suffix(info.name, ".odin") ||
+		   should_exclude(state, info.fullpath) {
+			continue
+		}
+		path := normalized_path(info.fullpath, context.temp_allocator)
+		if visited_files^[path] {
+			continue
+		}
+		visited_files^[path] = true
+		if !parse_file_into_context(state, path, false, true, false) {
+			return false
+		}
+	}
+	return true
+}
+
 scan_and_parse :: proc(state: ^Analysis_Context) -> bool {
 	roots := make([dynamic]string, context.temp_allocator)
 	append(&roots, state.root)
@@ -84,32 +217,174 @@ scan_and_parse :: proc(state: ^Analysis_Context) -> bool {
 		append(&roots, path)
 	}
 
-	for root in roots {
-		walker := os.walker_create(root)
-		for info in os.walker_walk(&walker) {
-			if info.type == .Directory {
-				if should_exclude(state, info.fullpath) {
-					os.walker_skip_dir(&walker)
-				}
-				continue
-			}
-			if info.type != .Regular || !strings.has_suffix(info.name, ".odin") {
-				continue
-			}
-			if should_exclude(state, info.fullpath) {
-				continue
-			}
-			if !parse_file_into_context(state, info.fullpath) {
-				os.walker_destroy(&walker)
-				return false
-			}
-		}
-		os.walker_destroy(&walker)
+	visited_files := make(map[string]bool, context.temp_allocator)
+	builtin_path, _ := filepath.join(
+		{ODIN_ROOT, "base", "builtin", "builtin.odin"},
+		context.temp_allocator,
+	)
+	builtin_path = normalized_path(builtin_path, context.temp_allocator)
+	if !parse_builtin_file_into_context(state, builtin_path) {
+		return false
 	}
+	visited_files[builtin_path] = true
+	add_watch_root(state, filepath.dir(builtin_path))
+
+	for root in roots {
+		if !scan_recursive_root(state, root, &visited_files) {
+			return false
+		}
+	}
+
+	visited_packages := make(map[string]bool, context.temp_allocator)
+	for import_index := 0; import_index < len(state.imports); import_index += 1 {
+		import_value := state.imports[import_index]
+		if !filepath.is_abs(import_value.resolved_path) {
+			continue
+		}
+		directory := normalized_path(
+			import_value.resolved_path,
+			context.temp_allocator,
+		)
+		if visited_packages[directory] {
+			continue
+		}
+		visited_packages[directory] = true
+		add_watch_root(state, dependency_watch_root(directory))
+		if !scan_package_directory(state, directory, &visited_files) {
+			return false
+		}
+	}
+
+	slice.sort_by(
+		state.watch_roots[:],
+		proc(a, b: string) -> bool {
+			return strings.compare(a, b) < 0
+		},
+	)
 	return true
 }
 
-parse_file_into_context :: proc(state: ^Analysis_Context, path: string) -> bool {
+parse_builtin_file_into_context :: proc(
+	state: ^Analysis_Context,
+	path: string,
+) -> bool {
+	arena_allocator := virtual_arena_allocator(state)
+	source_bytes, read_error := os.read_entire_file(path, arena_allocator)
+	if read_error != nil {
+		return false
+	}
+
+	record := File_Record {
+		id = File_ID(len(state.files)),
+		path = strings.clone(path, arena_allocator),
+		relative_path = strings.clone(path, arena_allocator),
+		package_name = strings.clone("builtin", arena_allocator),
+		package_directory = strings.clone(filepath.dir(path), arena_allocator),
+		source = string(source_bytes),
+		is_builtin = true,
+		occurrences_complete = false,
+	}
+	append(&state.files, record)
+	file := &state.files[len(state.files) - 1]
+	state.builtin_path = file.relative_path
+
+	symbol_count_before := len(state.symbols)
+	line_number := 1
+	line_start := 0
+	for line_start < len(file.source) {
+		line_end := line_start
+		for line_end < len(file.source) && file.source[line_end] != '\n' {
+			line_end += 1
+		}
+		line := file.source[line_start:line_end]
+
+		name_end := 0
+		if len(line) > 0 &&
+		   (line[0] == '_' ||
+		    line[0] >= 'a' && line[0] <= 'z' ||
+		    line[0] >= 'A' && line[0] <= 'Z') {
+			for name_end < len(line) && is_identifier_byte(line[name_end]) {
+				name_end += 1
+			}
+		}
+		operator_start := name_end
+		for operator_start < len(line) && line[operator_start] == ' ' {
+			operator_start += 1
+		}
+		if name_end > 0 &&
+		   operator_start + 1 < len(line) &&
+		   line[operator_start:operator_start + 2] == "::" {
+			detail := strings.trim_space(line[operator_start + 2:])
+			kind := Symbol_Kind.Constant
+			if strings.has_prefix(detail, "proc{") {
+				kind = .Procedure_Group
+			} else if strings.has_prefix(detail, "proc") {
+				kind = .Procedure
+			} else if strings.has_prefix(detail, "struct") {
+				kind = .Struct
+			} else if strings.has_prefix(detail, "union") {
+				kind = .Union
+			} else if strings.has_prefix(detail, "enum") {
+				kind = .Enum
+			}
+
+			symbol_id := Symbol_ID(len(state.symbols))
+			name_range := Source_Range {
+				start = position_from_ast(line_number, 1, line_start),
+				end = position_from_ast(
+					line_number,
+					name_end + 1,
+					line_start + name_end,
+				),
+			}
+			append(
+				&state.symbols,
+				Symbol {
+					id = symbol_id,
+					name = strings.clone(line[:name_end], arena_allocator),
+					kind = kind,
+					path = file.relative_path,
+					package_name = file.package_name,
+					package_directory = file.package_directory,
+					range = name_range,
+					extent = Source_Range {
+						start = name_range.start,
+						end = position_from_ast(
+							line_number,
+							len(line) + 1,
+							line_end,
+						),
+					},
+					detail = strings.clone(detail, arena_allocator),
+					is_global = true,
+				},
+			)
+			append(
+				&state.occurrences,
+				Occurrence {
+					name = state.symbols[int(symbol_id)].name,
+					path = file.relative_path,
+					package_name = file.package_name,
+					package_directory = file.package_directory,
+					range = name_range,
+					symbol = symbol_id,
+				},
+			)
+		}
+
+		line_start = line_end + 1
+		line_number += 1
+	}
+	return len(state.symbols) > symbol_count_before
+}
+
+parse_file_into_context :: proc(
+	state: ^Analysis_Context,
+	path: string,
+	is_builtin := false,
+	collect_import_declarations := true,
+	collect_occurrences := true,
+) -> bool {
 	arena_allocator := virtual_arena_allocator(state)
 	source_bytes, read_error := os.read_entire_file(path, arena_allocator)
 	if read_error != nil {
@@ -126,11 +401,16 @@ parse_file_into_context :: proc(state: ^Analysis_Context, path: string) -> bool 
 	record := File_Record {
 		id = File_ID(len(state.files)),
 		path = strings.clone(path, arena_allocator),
-		relative_path = relative_path(state.root, path, arena_allocator),
+		relative_path = published_path(state, path, arena_allocator),
 		package_name = strings.clone(package_path, arena_allocator),
-		package_directory = relative_path(state.root, package_path, arena_allocator),
 		source = string(source_bytes),
+		is_builtin = is_builtin,
+		occurrences_complete = collect_occurrences,
 	}
+	record.package_directory = strings.clone(
+		filepath.dir(record.relative_path),
+		arena_allocator,
+	)
 	record.ast_file = ast.File {
 		pkg = ast_package,
 		fullpath = record.path,
@@ -151,7 +431,12 @@ parse_file_into_context :: proc(state: ^Analysis_Context, path: string) -> bool 
 
 	append(&state.files, record)
 	file := &state.files[len(state.files) - 1]
-	collect_file(state, file)
+	collect_file(
+		state,
+		file,
+		collect_import_declarations,
+		collect_occurrences,
+	)
 	return true
 }
 
@@ -313,6 +598,9 @@ collect_visit :: proc(visitor: ^ast.Visitor, node: ^ast.Node) -> ^ast.Visitor {
 			collector.call_offsets[expression.field.pos.offset] = true
 		}
 	case ^ast.Ident:
+		if !collector.collect_occurrences {
+			return visitor
+		}
 		append(
 			&collector.analysis.occurrences,
 			Occurrence {
@@ -362,6 +650,7 @@ collect_imports :: proc(state: ^Analysis_Context, file: ^File_Record) {
 				alias = strings.clone(alias, allocator),
 				import_path = strings.clone(import_path, allocator),
 				resolved_path = resolved,
+				is_using = declaration.is_using,
 				range = range_from_node(cast(^ast.Node)declaration),
 			},
 		)
@@ -387,6 +676,15 @@ resolve_import_path :: proc(
 				return result
 			}
 		}
+		if collection_name == "base" ||
+		   collection_name == "core" ||
+		   collection_name == "vendor" {
+			result, _ := filepath.join(
+				{ODIN_ROOT, collection_name, suffix},
+				allocator,
+			)
+			return result
+		}
 		return strings.clone(import_path, allocator)
 	}
 	if strings.has_prefix(import_path, "./") || strings.has_prefix(import_path, "../") {
@@ -396,7 +694,12 @@ resolve_import_path :: proc(
 	return strings.clone(import_path, allocator)
 }
 
-collect_file :: proc(state: ^Analysis_Context, file: ^File_Record) {
+collect_file :: proc(
+	state: ^Analysis_Context,
+	file: ^File_Record,
+	collect_import_declarations := true,
+	collect_occurrences := true,
+) {
 	top_level := make(map[^ast.Node]bool, context.temp_allocator)
 	for statement in file.ast_file.decls {
 		top_level[cast(^ast.Node)statement] = true
@@ -410,10 +713,13 @@ collect_file :: proc(state: ^Analysis_Context, file: ^File_Record) {
 		call_offsets = make(map[int]bool, context.temp_allocator),
 		field_kinds = make(map[^ast.Field]Symbol_Kind, context.temp_allocator),
 		field_owners = make(map[^ast.Field]string, context.temp_allocator),
+		collect_occurrences = collect_occurrences,
 	}
 	visitor := ast.Visitor{visit = collect_visit, data = &collector}
 	for statement in file.ast_file.decls {
 		ast.walk(&visitor, cast(^ast.Node)statement)
 	}
-	collect_imports(state, file)
+	if collect_import_declarations {
+		collect_imports(state, file)
+	}
 }

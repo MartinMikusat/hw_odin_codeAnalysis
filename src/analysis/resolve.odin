@@ -1,6 +1,9 @@
 package analysis
 
 import "core:path/filepath"
+import "core:mem/virtual"
+
+Symbol_Name_Index :: map[string][dynamic]Symbol_ID
 
 same_position :: proc(a, b: Source_Position) -> bool {
 	return a.offset == b.offset
@@ -19,8 +22,13 @@ range_contains :: proc(value: Source_Range, line, column: int) -> bool {
 	return true
 }
 
-find_declaration_occurrence :: proc(state: ^Analysis_Context, occurrence: Occurrence) -> Symbol_ID {
-	for symbol in state.symbols {
+find_declaration_occurrence :: proc(
+	state: ^Analysis_Context,
+	occurrence: Occurrence,
+	candidates: []Symbol_ID,
+) -> Symbol_ID {
+	for symbol_id in candidates {
+		symbol := state.symbols[int(symbol_id)]
 		if symbol.path == occurrence.path && same_position(symbol.range.start, occurrence.range.start) {
 			return symbol.id
 		}
@@ -28,8 +36,107 @@ find_declaration_occurrence :: proc(state: ^Analysis_Context, occurrence: Occurr
 	return Symbol_ID(-1)
 }
 
-resolve_occurrence :: proc(state: ^Analysis_Context, occurrence: Occurrence) -> Symbol_ID {
-	if declaration := find_declaration_occurrence(state, occurrence); int(declaration) >= 0 {
+symbol_is_builtin :: proc(state: ^Analysis_Context, symbol: Symbol) -> bool {
+	return state.builtin_path != "" && symbol.path == state.builtin_path
+}
+
+symbol_occurrences_are_complete :: proc(
+	state: ^Analysis_Context,
+	symbol: Symbol,
+) -> bool {
+	for file in state.files {
+		if file.relative_path == symbol.path {
+			return file.occurrences_complete
+		}
+	}
+	return false
+}
+
+import_exposes_symbol :: proc(
+	state: ^Analysis_Context,
+	import_value: Import,
+	symbol: Symbol,
+) -> bool {
+	for file in state.files {
+		if file.relative_path == symbol.path &&
+		   filepath.dir(file.path) == import_value.resolved_path {
+			return true
+		}
+	}
+	return false
+}
+
+same_package_match :: proc(
+	state: ^Analysis_Context,
+	occurrence: Occurrence,
+	candidates: []Symbol_ID,
+) -> (match: Symbol_ID, count: int) {
+	match = Symbol_ID(-1)
+	for symbol_id in candidates {
+		symbol := state.symbols[int(symbol_id)]
+		if symbol.name == occurrence.name &&
+		   symbol.package_directory == occurrence.package_directory &&
+		   symbol.is_global &&
+		   !symbol_is_builtin(state, symbol) {
+			match = symbol.id
+			count += 1
+		}
+	}
+	return
+}
+
+using_import_match :: proc(
+	state: ^Analysis_Context,
+	occurrence: Occurrence,
+	candidates: []Symbol_ID,
+) -> (match: Symbol_ID, count: int) {
+	match = Symbol_ID(-1)
+	for symbol_id in candidates {
+		symbol := state.symbols[int(symbol_id)]
+		if symbol.name != occurrence.name ||
+		   !symbol.is_global ||
+		   symbol_is_builtin(state, symbol) {
+			continue
+		}
+		for import_value in state.imports {
+			if import_value.path == occurrence.path &&
+			   import_value.is_using &&
+			   import_exposes_symbol(state, import_value, symbol) {
+				match = symbol.id
+				count += 1
+				break
+			}
+		}
+	}
+	return
+}
+
+builtin_match :: proc(
+	state: ^Analysis_Context,
+	occurrence: Occurrence,
+	candidates: []Symbol_ID,
+) -> (match: Symbol_ID, count: int) {
+	match = Symbol_ID(-1)
+	for symbol_id in candidates {
+		symbol := state.symbols[int(symbol_id)]
+		if symbol.name == occurrence.name && symbol_is_builtin(state, symbol) {
+			match = symbol.id
+			count += 1
+		}
+	}
+	return
+}
+
+resolve_occurrence :: proc(
+	state: ^Analysis_Context,
+	occurrence: Occurrence,
+	candidates: []Symbol_ID,
+) -> Symbol_ID {
+	if declaration := find_declaration_occurrence(
+		state,
+		occurrence,
+		candidates,
+	); int(declaration) >= 0 {
 		return declaration
 	}
 
@@ -40,7 +147,8 @@ resolve_occurrence :: proc(state: ^Analysis_Context, occurrence: Occurrence) -> 
 		occurrence.path,
 		occurrence.range.start.offset,
 	)
-	for symbol in state.symbols {
+	for symbol_id in candidates {
+		symbol := state.symbols[int(symbol_id)]
 		if symbol.name != occurrence.name || symbol.path != occurrence.path || symbol.is_global {
 			continue
 		}
@@ -61,49 +169,124 @@ resolve_occurrence :: proc(state: ^Analysis_Context, occurrence: Occurrence) -> 
 	}
 
 	if occurrence.is_selector {
-		if imported := resolve_import_selector(state, occurrence); int(imported) >= 0 {
+		if imported := resolve_import_selector(
+			state,
+			occurrence,
+			candidates,
+		); int(imported) >= 0 {
 			return imported
 		}
-		if field := resolve_field_selector(state, occurrence); int(field) >= 0 {
+		if field := resolve_field_selector(
+			state,
+			occurrence,
+			candidates,
+		); int(field) >= 0 {
 			return field
 		}
+		return Symbol_ID(-1)
 	}
 
-	package_match := Symbol_ID(-1)
-	package_count := 0
+	package_match, package_count := same_package_match(
+		state,
+		occurrence,
+		candidates,
+	)
+	if package_count > 0 {
+		return package_match if package_count == 1 else Symbol_ID(-1)
+	}
+
+	using_match, using_count := using_import_match(
+		state,
+		occurrence,
+		candidates,
+	)
+	if using_count > 0 {
+		return using_match if using_count == 1 else Symbol_ID(-1)
+	}
+
+	builtin_value, builtin_count := builtin_match(
+		state,
+		occurrence,
+		candidates,
+	)
+	if builtin_count == 1 {
+		return builtin_value
+	}
+	return Symbol_ID(-1)
+}
+
+visible_candidates :: proc(
+	state: ^Analysis_Context,
+	occurrence: Occurrence,
+	allocator := context.allocator,
+) -> []Symbol {
+	result := make([dynamic]Symbol, allocator)
+	if occurrence.is_selector {
+		for symbol in state.symbols {
+			if !symbol.is_global || symbol.name != occurrence.name {
+				continue
+			}
+			for import_value in state.imports {
+				if import_value.path == occurrence.path &&
+				   import_value.alias == occurrence.selector_base &&
+				   import_exposes_symbol(state, import_value, symbol) {
+					append(&result, symbol)
+					break
+				}
+			}
+		}
+		return result[:]
+	}
+
 	for symbol in state.symbols {
 		if symbol.name == occurrence.name &&
 		   symbol.package_directory == occurrence.package_directory &&
-		   symbol.is_global {
-			package_match = symbol.id
-			package_count += 1
+		   symbol.is_global &&
+		   !symbol_is_builtin(state, symbol) {
+			append(&result, symbol)
 		}
 	}
-	if package_count == 1 {
-		return package_match
+	if len(result) > 0 {
+		return result[:]
 	}
 
-	global_match := Symbol_ID(-1)
-	global_count := 0
 	for symbol in state.symbols {
-		if symbol.name == occurrence.name && symbol.is_global {
-			global_match = symbol.id
-			global_count += 1
+		if symbol.name != occurrence.name ||
+		   !symbol.is_global ||
+		   symbol_is_builtin(state, symbol) {
+			continue
+		}
+		for import_value in state.imports {
+			if import_value.path == occurrence.path &&
+			   import_value.is_using &&
+			   import_exposes_symbol(state, import_value, symbol) {
+				append(&result, symbol)
+				break
+			}
 		}
 	}
-	if global_count == 1 {
-		return global_match
+	if len(result) > 0 {
+		return result[:]
 	}
-	return Symbol_ID(-1)
+
+	for symbol in state.symbols {
+		if symbol.name == occurrence.name && symbol_is_builtin(state, symbol) {
+			append(&result, symbol)
+		}
+	}
+	return result[:]
 }
 
 resolve_import_selector :: proc(
 	state: ^Analysis_Context,
 	occurrence: Occurrence,
+	candidates: []Symbol_ID,
 ) -> Symbol_ID {
 	if occurrence.selector_base == "" {
 		return Symbol_ID(-1)
 	}
+	match := Symbol_ID(-1)
+	count := 0
 	for import_value in state.imports {
 		if import_value.path != occurrence.path ||
 		   import_value.alias != occurrence.selector_base {
@@ -113,14 +296,19 @@ resolve_import_selector :: proc(
 			if filepath.dir(file.path) != import_value.resolved_path {
 				continue
 			}
-			for symbol in state.symbols {
+			for symbol_id in candidates {
+				symbol := state.symbols[int(symbol_id)]
 				if symbol.path == file.relative_path &&
 				   symbol.name == occurrence.name &&
 				   symbol.is_global {
-					return symbol.id
+					match = symbol.id
+					count += 1
 				}
 			}
 		}
+	}
+	if count == 1 {
+		return match
 	}
 	return Symbol_ID(-1)
 }
@@ -174,6 +362,7 @@ resolve_base_symbol :: proc(
 resolve_field_selector :: proc(
 	state: ^Analysis_Context,
 	occurrence: Occurrence,
+	candidates: []Symbol_ID,
 ) -> Symbol_ID {
 	base_id := resolve_base_symbol(state, occurrence)
 	if int(base_id) < 0 {
@@ -199,7 +388,8 @@ resolve_field_selector :: proc(
 	type_value := state.symbols[int(type_symbol)]
 	match := Symbol_ID(-1)
 	count := 0
-	for field in state.symbols {
+	for field_id in candidates {
+		field := state.symbols[int(field_id)]
 		if field.kind == .Field &&
 		   field.name == occurrence.name &&
 		   field.owner_type == type_value.name &&
@@ -214,10 +404,30 @@ resolve_field_selector :: proc(
 	return Symbol_ID(-1)
 }
 
-resolve_occurrences :: proc(state: ^Analysis_Context) {
-	for &occurrence in state.occurrences {
-		occurrence.symbol = resolve_occurrence(state, occurrence)
+resolve_occurrences :: proc(state: ^Analysis_Context) -> bool {
+	index_arena: virtual.Arena
+	if virtual.arena_init_growing(&index_arena) != nil {
+		return false
 	}
+	defer virtual.arena_destroy(&index_arena)
+	index_allocator := virtual.arena_allocator(&index_arena)
+	name_index := make(Symbol_Name_Index, index_allocator)
+	for symbol in state.symbols {
+		candidates, found := name_index[symbol.name]
+		if !found {
+			candidates = make([dynamic]Symbol_ID, index_allocator)
+		}
+		append(&candidates, symbol.id)
+		name_index[symbol.name] = candidates
+	}
+	for &occurrence in state.occurrences {
+		occurrence.symbol = resolve_occurrence(
+			state,
+			occurrence,
+			name_index[occurrence.name][:],
+		)
+	}
+	return true
 }
 
 occurrence_at :: proc(

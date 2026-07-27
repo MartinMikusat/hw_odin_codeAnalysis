@@ -181,6 +181,25 @@ execute :: proc(
 		if !analysis.valid_identifier(arguments[3]) {
 			return Response{error = "NEW_NAME must be a valid Odin identifier"}
 		}
+		target := analysis.location_for_position(
+			state,
+			path,
+			line,
+			column,
+			context.temp_allocator,
+		)
+		if target.resolution == .Unresolved {
+			return Response{error = "rename target is unresolved"}
+		}
+		if target.resolution == .Ambiguous || len(target.locations) != 1 {
+			return Response{error = "rename target is ambiguous"}
+		}
+		if analysis.symbol_is_builtin(state, target.locations[0]) {
+			return Response{error = "rename target is a read-only built-in"}
+		}
+		if !analysis.symbol_occurrences_are_complete(state, target.locations[0]) {
+			return Response{error = "rename target is in a read-only dependency"}
+		}
 		if !analysis.rename_is_safe(
 			state,
 			path,

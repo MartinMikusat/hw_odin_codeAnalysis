@@ -20,7 +20,7 @@ query_path :: proc(
 		delete(absolute, allocator)
 		absolute = resolved
 	}
-	relative = relative_path(state.root, absolute, allocator)
+	relative = published_path(state, absolute, allocator)
 	ok = true
 	return
 }
