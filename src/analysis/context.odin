@@ -19,6 +19,7 @@ File_Record :: struct {
 Analysis_Context :: struct {
 	root:        string,
 	config:      Config,
+	config_digest: string,
 	arena:       virtual.Arena,
 	files:       [dynamic]File_Record,
 	symbols:     [dynamic]Symbol,
@@ -58,7 +59,12 @@ context_init :: proc(state: ^Analysis_Context, root: string) -> bool {
 		return false
 	}
 	state.root = strings.clone(root)
-	state.config = load_config(root)
+	config_ok: bool
+	state.config, state.config_digest, config_ok = load_config(root)
+	if !config_ok {
+		context_destroy(state)
+		return false
+	}
 	if !context_build_index(state) {
 		context_destroy(state)
 		return false
@@ -73,6 +79,7 @@ context_destroy :: proc(state: ^Analysis_Context) {
 	}
 	delete(state.root)
 	config_destroy(&state.config)
+	delete(state.config_digest)
 	delete(state.files)
 	delete(state.symbols)
 	delete(state.occurrences)
@@ -97,7 +104,12 @@ context_build_candidate :: proc(
 		return false
 	}
 	candidate.root = strings.clone(state.root)
-	candidate.config = config_clone(&state.config)
+	config_ok: bool
+	candidate.config, candidate.config_digest, config_ok = load_config(state.root)
+	if !config_ok {
+		context_destroy(candidate)
+		return false
+	}
 	if !context_build_index(candidate) {
 		context_destroy(candidate)
 		return false
@@ -138,5 +150,6 @@ status :: proc(state: ^Analysis_Context, persistent := false) -> Status {
 		occurrence_count = len(state.occurrences),
 		generation = state.generation,
 		persistent = persistent,
+		config_digest = state.config_digest,
 	}
 }

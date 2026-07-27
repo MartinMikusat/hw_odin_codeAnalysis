@@ -25,6 +25,30 @@ STABLE_SOURCE :: `package fixture
 stable :: proc() {}
 `
 
+EXCLUDED_SOURCE :: `package excluded
+
+excluded_name :: proc() {}
+`
+
+COLLECTION_SOURCE :: `package collection
+
+collection_name :: proc() {}
+`
+
+INITIAL_CONFIG :: `{
+    "exclude_paths": ["excluded"]
+}`
+
+RELOADED_CONFIG :: `{
+    "collections": [
+        {
+            "name": "test_collection",
+            "path": "../collection"
+        }
+    ],
+    "exclude_paths": ["ignored"]
+}`
+
 temporary_workspace :: proc(t: ^testing.T) -> (
 	root: string,
 	main_path: string,
@@ -64,6 +88,19 @@ destroy_temporary_workspace :: proc(
 	delete(root)
 }
 
+watch_roots_contain :: proc(state: ^analysis.Analysis_Context, path: string) -> bool {
+	normalized, path_error := os.get_absolute_path(path, context.temp_allocator)
+	if path_error != nil {
+		return false
+	}
+	for root in state.watch_roots {
+		if root == normalized {
+			return true
+		}
+	}
+	return false
+}
+
 fixture_context :: proc() -> (state: analysis.Analysis_Context, ok: bool) {
 	root, root_error := os.get_absolute_path(
 		"tests/fixtures/workspace",
@@ -86,6 +123,208 @@ fixture_context_at :: proc(path: string) -> (
 	}
 	ok = analysis.context_init(&state, root)
 	return
+}
+
+@(test)
+configuration_digest_tracks_effective_values :: proc(t: ^testing.T) {
+	root, main_path, stable_path, workspace_ok := temporary_workspace(t)
+	if !workspace_ok {
+		if root != "" {
+			destroy_temporary_workspace(root, main_path, stable_path)
+		}
+		return
+	}
+	defer destroy_temporary_workspace(root, main_path, stable_path)
+
+	config_path, _ := filepath.join(
+		{root, "code-analysis.json"},
+		context.allocator,
+	)
+	defer delete(config_path)
+
+	state: analysis.Analysis_Context
+	testing.expect(t, analysis.context_init(&state, root))
+	if !state.initialized {
+		return
+	}
+	defer analysis.context_destroy(&state)
+
+	default_digest := strings.clone(state.config_digest)
+	defer delete(default_digest)
+	testing.expect(t, default_digest != "")
+	testing.expect_value(
+		t,
+		os.write_entire_file(
+			config_path,
+			`{
+			    "exclude_paths": [".git", "build", ".cache"],
+			    "odin_command": "odin"
+			}`,
+		),
+		nil,
+	)
+	testing.expect(t, analysis.context_rebuild(&state))
+	testing.expect_value(t, state.config_digest, default_digest)
+
+	testing.expect_value(
+		t,
+		os.write_entire_file(
+			config_path,
+			`{"checker_args":["-strict-style"]}`,
+		),
+		nil,
+	)
+	testing.expect(t, analysis.context_rebuild(&state))
+	testing.expect(t, state.config_digest != default_digest)
+}
+
+@(test)
+configuration_reload_is_transactional :: proc(t: ^testing.T) {
+	parent, parent_error := os.make_directory_temp(
+		"",
+		"hw-odin-config-*",
+		context.allocator,
+	)
+	testing.expect_value(t, parent_error, nil)
+	if parent_error != nil {
+		return
+	}
+	defer {
+		_ = os.remove_all(parent)
+		delete(parent)
+	}
+
+	root, _ := filepath.join({parent, "app"}, context.allocator)
+	excluded_root, _ := filepath.join(
+		{root, "excluded"},
+		context.allocator,
+	)
+	collection_root, _ := filepath.join(
+		{parent, "collection"},
+		context.allocator,
+	)
+	defer delete(root)
+	defer delete(excluded_root)
+	defer delete(collection_root)
+
+	testing.expect_value(t, os.make_directory_all(excluded_root), nil)
+	testing.expect_value(t, os.make_directory_all(collection_root), nil)
+	main_path, _ := filepath.join({root, "main.odin"}, context.allocator)
+	excluded_path, _ := filepath.join(
+		{excluded_root, "excluded.odin"},
+		context.allocator,
+	)
+	collection_path, _ := filepath.join(
+		{collection_root, "collection.odin"},
+		context.allocator,
+	)
+	config_path, _ := filepath.join(
+		{root, "code-analysis.json"},
+		context.allocator,
+	)
+	defer delete(main_path)
+	defer delete(excluded_path)
+	defer delete(collection_path)
+	defer delete(config_path)
+
+	testing.expect_value(
+		t,
+		os.write_entire_file(main_path, INITIAL_MAIN_SOURCE),
+		nil,
+	)
+	testing.expect_value(
+		t,
+		os.write_entire_file(excluded_path, EXCLUDED_SOURCE),
+		nil,
+	)
+	testing.expect_value(
+		t,
+		os.write_entire_file(collection_path, COLLECTION_SOURCE),
+		nil,
+	)
+	testing.expect_value(
+		t,
+		os.write_entire_file(config_path, INITIAL_CONFIG),
+		nil,
+	)
+
+	state: analysis.Analysis_Context
+	testing.expect(t, analysis.context_init(&state, root))
+	if !state.initialized {
+		return
+	}
+	defer analysis.context_destroy(&state)
+
+	generation := state.generation
+	file_count := len(state.files)
+	watch_root_count := len(state.watch_roots)
+	digest := strings.clone(state.config_digest)
+	defer delete(digest)
+	testing.expect_value(
+		t,
+		len(analysis.search(&state, "excluded_name", context.temp_allocator)),
+		0,
+	)
+	testing.expect(t, !watch_roots_contain(&state, collection_root))
+
+	testing.expect_value(
+		t,
+		os.write_entire_file(config_path, `{"exclude_paths":[`),
+		nil,
+	)
+	candidate: analysis.Analysis_Context
+	testing.expect(t, !analysis.context_build_candidate(&state, &candidate))
+	testing.expect(t, !candidate.initialized)
+	testing.expect_value(t, state.generation, generation)
+	testing.expect_value(t, len(state.files), file_count)
+	testing.expect_value(t, len(state.watch_roots), watch_root_count)
+	testing.expect_value(t, state.config_digest, digest)
+
+	testing.expect_value(
+		t,
+		os.write_entire_file(config_path, RELOADED_CONFIG),
+		nil,
+	)
+	testing.expect(t, analysis.context_build_candidate(&state, &candidate))
+	if !candidate.initialized {
+		return
+	}
+	defer analysis.context_destroy(&candidate)
+
+	testing.expect_value(t, state.generation, generation)
+	testing.expect_value(t, state.config_digest, digest)
+	testing.expect_value(t, candidate.generation, generation + 1)
+	testing.expect_value(t, len(candidate.files), file_count + 2)
+	testing.expect(t, candidate.config_digest != digest)
+	testing.expect(t, watch_roots_contain(&candidate, collection_root))
+	testing.expect_value(
+		t,
+		len(
+			analysis.search(
+				&candidate,
+				"excluded_name",
+				context.temp_allocator,
+			),
+		),
+		1,
+	)
+	testing.expect_value(
+		t,
+		len(
+			analysis.search(
+				&candidate,
+				"collection_name",
+				context.temp_allocator,
+			),
+		),
+		1,
+	)
+
+	analysis.context_publish_candidate(&state, &candidate)
+	testing.expect(t, !candidate.initialized)
+	testing.expect_value(t, state.generation, generation + 1)
+	testing.expect(t, state.config_digest != digest)
+	testing.expect(t, watch_roots_contain(&state, collection_root))
 }
 
 @(test)

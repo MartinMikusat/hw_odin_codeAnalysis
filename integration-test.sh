@@ -7,6 +7,8 @@ failure_root=""
 failure_analyzer=()
 dependency_root=""
 dependency_analyzer=()
+config_root=""
+config_analyzer=()
 
 cleanup() {
   "${analyzer[@]}" stop >/dev/null 2>&1 || true
@@ -18,6 +20,10 @@ cleanup() {
   if [[ -n "$dependency_root" ]]; then
     "${dependency_analyzer[@]}" stop >/dev/null 2>&1 || true
     rm -rf -- "$dependency_root"
+  fi
+  if [[ -n "$config_root" ]]; then
+    "${config_analyzer[@]}" stop >/dev/null 2>&1 || true
+    rm -rf -- "$config_root"
   fi
 }
 trap cleanup EXIT
@@ -176,3 +182,88 @@ dependency_generation_after="$(
     sed -E 's/.*"generation":([0-9]+).*/\1/'
 )"
 ((dependency_generation_after > dependency_generation))
+
+config_root="$(mktemp -d "${TMPDIR:-/tmp}/hw-odin-config-XXXXXX")"
+mkdir -p \
+  "$config_root/app/excluded" \
+  "$config_root/collection"
+config_analyzer=(
+  ./build/hw-odin-analyze
+  --root "$config_root/app"
+  --compact
+)
+printf 'package app\n\nmain_name :: proc() {}\n' \
+  >"$config_root/app/main.odin"
+printf 'package excluded\n\nexcluded_name :: proc() {}\n' \
+  >"$config_root/app/excluded/excluded.odin"
+printf 'package collection\n\ncollection_name :: proc() {}\n' \
+  >"$config_root/collection/collection.odin"
+printf '{"exclude_paths":["excluded"]}\n' \
+  >"$config_root/app/code-analysis.json"
+
+config_status="$("${config_analyzer[@]}" status)"
+config_file_count="$(
+  printf '%s' "$config_status" |
+    sed -E 's/.*"file_count":([0-9]+).*/\1/'
+)"
+config_digest="$(
+  printf '%s' "$config_status" |
+    sed -E 's/.*"config_digest":"([^"]+)".*/\1/'
+)"
+[[ -n "$config_digest" ]]
+config_excluded="$("${config_analyzer[@]}" search excluded_name)"
+[[ "$config_excluded" == '[]' ]]
+
+printf '%s\n' \
+  '{"collections":[{"name":"test_collection","path":"../collection"}],"exclude_paths":["ignored"]}' \
+  >"$config_root/app/code-analysis.json"
+config_reloaded=false
+for _ in {1..100}; do
+  if config_status="$("${config_analyzer[@]}" status 2>/dev/null)"; then
+    config_file_count_after="$(
+      printf '%s' "$config_status" |
+        sed -E 's/.*"file_count":([0-9]+).*/\1/'
+    )"
+    config_digest_after="$(
+      printf '%s' "$config_status" |
+        sed -E 's/.*"config_digest":"([^"]+)".*/\1/'
+    )"
+    if ((config_file_count_after == config_file_count + 2)) &&
+       [[ "$config_digest_after" != "$config_digest" ]]; then
+      config_reloaded=true
+      break
+    fi
+  fi
+  sleep 0.02
+done
+if [[ "$config_reloaded" != true ]]; then
+  printf 'expected the daemon to reload the configuration\n' >&2
+  exit 1
+fi
+
+config_excluded="$("${config_analyzer[@]}" search excluded_name)"
+[[ "$config_excluded" == *'"name":"excluded_name"'* ]]
+config_collection="$("${config_analyzer[@]}" search collection_name)"
+[[ "$config_collection" == *'"name":"collection_name"'* ]]
+
+printf '%s\n' \
+  'package collection' \
+  '' \
+  'collection_name :: proc() {}' \
+  'watched_collection_name :: proc() {}' \
+  >"$config_root/collection/collection.odin"
+config_collection_watched=false
+for _ in {1..100}; do
+  config_collection="$(
+    "${config_analyzer[@]}" search watched_collection_name
+  )"
+  if [[ "$config_collection" == *'"name":"watched_collection_name"'* ]]; then
+    config_collection_watched=true
+    break
+  fi
+  sleep 0.02
+done
+if [[ "$config_collection_watched" != true ]]; then
+  printf 'expected the replacement watcher to observe the collection\n' >&2
+  exit 1
+fi

@@ -65,6 +65,11 @@ Place `code-analysis.json` in the analysis root. The file can set the Odin
 command, checker arguments, collection roots, and excluded paths. See
 [`schema/code-analysis.schema.json`](schema/code-analysis.schema.json).
 
+The running daemon reloads this file before it rebuilds the index. It publishes
+the new configuration and watcher roots only after both are ready. An invalid
+configuration rejects the request and keeps the previous index active.
+The `status` result includes a digest of the effective configuration.
+
 ### Current analysis boundary
 
 The engine parses saved files with the Odin compiler AST packages. It resolves

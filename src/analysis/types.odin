@@ -111,4 +111,5 @@ Status :: struct {
 	generation:       u64,
 	pid:              int,
 	persistent:       bool,
+	config_digest:    string,
 }
