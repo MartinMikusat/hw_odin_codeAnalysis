@@ -318,6 +318,7 @@ run_daemon :: proc(root: string) {
 		watcher.flush(&file_watcher)
 		if watcher.consume_dirty(&file_watcher) {
 			if !analysis.context_rebuild(&state) {
+				watcher.mark_dirty(&file_watcher)
 				write_response(
 					client,
 					service.Response{error = "failed to rebuild the analysis index"},

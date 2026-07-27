@@ -1,9 +1,66 @@
 package tests
 
 import "core:os"
+import "core:path/filepath"
 import "core:testing"
 
 import "code_analysis:analysis"
+import "code_analysis:watcher"
+
+INITIAL_MAIN_SOURCE :: `package fixture
+
+original :: proc() {}
+`
+
+UPDATED_MAIN_SOURCE :: `package fixture
+
+original :: proc() {}
+added :: proc() {}
+`
+
+STABLE_SOURCE :: `package fixture
+
+stable :: proc() {}
+`
+
+temporary_workspace :: proc(t: ^testing.T) -> (
+	root: string,
+	main_path: string,
+	stable_path: string,
+	ok: bool,
+) {
+	root_error: os.Error
+	root, root_error = os.make_directory_temp(
+		"",
+		"hw-odin-analysis-*",
+		context.allocator,
+	)
+	testing.expect_value(t, root_error, nil)
+	if root_error != nil {
+		return
+	}
+
+	main_path, _ = filepath.join({root, "main.odin"}, context.allocator)
+	stable_path, _ = filepath.join({root, "stable.odin"}, context.allocator)
+	main_error := os.write_entire_file(main_path, INITIAL_MAIN_SOURCE)
+	stable_error := os.write_entire_file(stable_path, STABLE_SOURCE)
+	testing.expect_value(t, main_error, nil)
+	testing.expect_value(t, stable_error, nil)
+	ok = main_error == nil && stable_error == nil
+	return
+}
+
+destroy_temporary_workspace :: proc(
+	root: string,
+	main_path: string,
+	stable_path: string,
+) {
+	_ = os.change_mode(stable_path, os.Permissions_Default_File)
+	_ = os.remove_all(root)
+	delete(main_path)
+	delete(stable_path)
+	delete(root)
+}
 
 fixture_context :: proc() -> (state: analysis.Analysis_Context, ok: bool) {
 	root, root_error := os.get_absolute_path(
@@ -189,4 +246,94 @@ selector_completion_uses_receiver_type :: proc(t: ^testing.T) {
 	)
 	testing.expect_value(t, len(imports), 1)
 	testing.expect_value(t, imports[0].name, "ping")
+}
+
+@(test)
+failed_rebuild_preserves_published_generation :: proc(t: ^testing.T) {
+	root, main_path, stable_path, workspace_ok := temporary_workspace(t)
+	if !workspace_ok {
+		if root != "" {
+			destroy_temporary_workspace(root, main_path, stable_path)
+		}
+		return
+	}
+	defer destroy_temporary_workspace(root, main_path, stable_path)
+
+	state: analysis.Analysis_Context
+	testing.expect(t, analysis.context_init(&state, root))
+	if !state.initialized {
+		return
+	}
+	defer analysis.context_destroy(&state)
+
+	generation := state.generation
+	file_count := len(state.files)
+	symbol_count := len(state.symbols)
+	original := analysis.search(&state, "original", context.temp_allocator)
+	testing.expect_value(t, len(original), 1)
+
+	testing.expect_value(
+		t,
+		os.write_entire_file(main_path, UPDATED_MAIN_SOURCE),
+		nil,
+	)
+	testing.expect_value(t, os.change_mode(stable_path, os.Permissions{}), nil)
+
+	for _ in 0 ..< 2 {
+		testing.expect(t, !analysis.context_rebuild(&state))
+		testing.expect_value(t, state.generation, generation)
+		testing.expect_value(t, len(state.files), file_count)
+		testing.expect_value(t, len(state.symbols), symbol_count)
+		testing.expect_value(
+			t,
+			len(analysis.search(&state, "original", context.temp_allocator)),
+			1,
+		)
+		testing.expect_value(
+			t,
+			len(analysis.search(&state, "added", context.temp_allocator)),
+			0,
+		)
+	}
+
+	testing.expect_value(
+		t,
+		os.change_mode(stable_path, os.Permissions_Default_File),
+		nil,
+	)
+	testing.expect(t, analysis.context_rebuild(&state))
+	testing.expect_value(t, state.generation, generation + 1)
+	testing.expect_value(
+		t,
+		len(analysis.search(&state, "added", context.temp_allocator)),
+		1,
+	)
+}
+
+@(test)
+failed_initial_build_releases_context :: proc(t: ^testing.T) {
+	root, main_path, stable_path, workspace_ok := temporary_workspace(t)
+	if !workspace_ok {
+		if root != "" {
+			destroy_temporary_workspace(root, main_path, stable_path)
+		}
+		return
+	}
+	defer destroy_temporary_workspace(root, main_path, stable_path)
+
+	testing.expect_value(t, os.change_mode(stable_path, os.Permissions{}), nil)
+	state: analysis.Analysis_Context
+	testing.expect(t, !analysis.context_init(&state, root))
+	testing.expect(t, !state.initialized)
+	analysis.context_destroy(&state)
+}
+
+@(test)
+dirty_watcher_can_be_rearmed :: proc(t: ^testing.T) {
+	value: watcher.Watcher
+	watcher.mark_dirty(&value)
+	testing.expect(t, watcher.consume_dirty(&value))
+	testing.expect(t, !watcher.consume_dirty(&value))
+	watcher.mark_dirty(&value)
+	testing.expect(t, watcher.consume_dirty(&value))
 }

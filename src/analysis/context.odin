@@ -26,21 +26,41 @@ Analysis_Context :: struct {
 	initialized: bool,
 }
 
-context_init :: proc(state: ^Analysis_Context, root: string) -> bool {
+context_allocate_index :: proc(state: ^Analysis_Context) -> bool {
 	if state == nil {
 		return false
 	}
 	if virtual.arena_init_growing(&state.arena) != nil {
 		return false
 	}
-	state.root = strings.clone(root)
-	state.config = load_config(root)
 	state.files = make([dynamic]File_Record)
 	state.symbols = make([dynamic]Symbol)
 	state.occurrences = make([dynamic]Occurrence)
 	state.imports = make([dynamic]Import)
 	state.initialized = true
-	return context_rebuild(state)
+	return true
+}
+
+context_build_index :: proc(state: ^Analysis_Context) -> bool {
+	if !scan_and_parse(state) {
+		return false
+	}
+	resolve_occurrences(state)
+	return true
+}
+
+context_init :: proc(state: ^Analysis_Context, root: string) -> bool {
+	if !context_allocate_index(state) {
+		return false
+	}
+	state.root = strings.clone(root)
+	state.config = load_config(root)
+	if !context_build_index(state) {
+		context_destroy(state)
+		return false
+	}
+	state.generation = 1
+	return true
 }
 
 context_destroy :: proc(state: ^Analysis_Context) {
@@ -61,17 +81,23 @@ context_rebuild :: proc(state: ^Analysis_Context) -> bool {
 	if state == nil || !state.initialized {
 		return false
 	}
-	clear(&state.files)
-	clear(&state.symbols)
-	clear(&state.occurrences)
-	clear(&state.imports)
-	free_all(virtual.arena_allocator(&state.arena))
 
-	if !scan_and_parse(state) {
+	candidate: Analysis_Context
+	if !context_allocate_index(&candidate) {
 		return false
 	}
-	resolve_occurrences(state)
-	state.generation += 1
+	candidate.root = strings.clone(state.root)
+	candidate.config = config_clone(&state.config)
+	if !context_build_index(&candidate) {
+		context_destroy(&candidate)
+		return false
+	}
+	candidate.generation = state.generation + 1
+
+	previous := state^
+	state^ = candidate
+	candidate = previous
+	context_destroy(&candidate)
 	return true
 }
 

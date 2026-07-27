@@ -170,6 +170,13 @@ consume_dirty :: proc(watcher: ^Watcher) -> bool {
 	return sync.atomic_exchange(&watcher.dirty, 0) != 0
 }
 
+mark_dirty :: proc(watcher: ^Watcher) {
+	if watcher == nil {
+		return
+	}
+	sync.atomic_store(&watcher.dirty, 1)
+}
+
 flush :: proc(watcher: ^Watcher) {
 	if watcher == nil || watcher.stream == nil {
 		return

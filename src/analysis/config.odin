@@ -17,6 +17,28 @@ Config :: struct {
 	exclude_paths: []string,
 }
 
+config_clone :: proc(config: ^Config, allocator := context.allocator) -> Config {
+	result := Config {
+		odin_command = strings.clone(config.odin_command, allocator),
+		checker_args = make([]string, len(config.checker_args), allocator),
+		collections = make([]Collection_Config, len(config.collections), allocator),
+		exclude_paths = make([]string, len(config.exclude_paths), allocator),
+	}
+	for value, index in config.checker_args {
+		result.checker_args[index] = strings.clone(value, allocator)
+	}
+	for collection, index in config.collections {
+		result.collections[index] = Collection_Config {
+			name = strings.clone(collection.name, allocator),
+			path = strings.clone(collection.path, allocator),
+		}
+	}
+	for value, index in config.exclude_paths {
+		result.exclude_paths[index] = strings.clone(value, allocator)
+	}
+	return result
+}
+
 default_config :: proc(allocator := context.allocator) -> Config {
 	config := Config{odin_command = strings.clone("odin", allocator)}
 	config.exclude_paths = make([]string, 3, allocator)
