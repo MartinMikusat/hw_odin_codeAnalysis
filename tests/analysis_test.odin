@@ -3,10 +3,13 @@ package tests
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+import "core:sys/posix"
 import "core:testing"
+import "core:time"
 
 import "code_analysis:analysis"
 import "code_analysis:service"
+import "code_analysis:transport"
 import "code_analysis:watcher"
 
 INITIAL_MAIN_SOURCE :: `package fixture
@@ -123,6 +126,52 @@ fixture_context_at :: proc(path: string) -> (
 	}
 	ok = analysis.context_init(&state, root)
 	return
+}
+
+@(test)
+timed_transport_receive_releases_the_next_request :: proc(t: ^testing.T) {
+	stalled: [2]posix.FD
+	socket_error := posix.socketpair(.UNIX, .STREAM, .IP, &stalled)
+	testing.expect_value(t, socket_error, posix.result(.OK))
+	if socket_error != .OK {
+		return
+	}
+	defer posix.close(stalled[0])
+	defer posix.close(stalled[1])
+
+	testing.expect(
+		t,
+		transport.send_all(stalled[1], []byte{0}),
+	)
+	started := time.tick_now()
+	stalled_data, stalled_ok := transport.receive_message_with_timeout(
+		stalled[0],
+		20 * time.Millisecond,
+	)
+	elapsed := time.tick_since(started)
+	delete(stalled_data)
+	testing.expect(t, !stalled_ok)
+	testing.expect(t, elapsed < 250 * time.Millisecond)
+
+	next: [2]posix.FD
+	socket_error = posix.socketpair(.UNIX, .STREAM, .IP, &next)
+	testing.expect_value(t, socket_error, posix.result(.OK))
+	if socket_error != .OK {
+		return
+	}
+	defer posix.close(next[0])
+	defer posix.close(next[1])
+
+	expected_text := `{"command":"status"}`
+	expected := transmute([]byte)expected_text
+	testing.expect(t, transport.send_message(next[1], expected))
+	received, received_ok := transport.receive_message_with_timeout(
+		next[0],
+		20 * time.Millisecond,
+	)
+	defer delete(received)
+	testing.expect(t, received_ok)
+	testing.expect_value(t, string(received), expected_text)
 }
 
 @(test)

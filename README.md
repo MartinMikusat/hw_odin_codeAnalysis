@@ -40,7 +40,8 @@ Analysis commands emit JSON and do not change source files. Source positions use
 
 The executable starts one daemon for each analysis root. The client and daemon
 exchange length-prefixed JSON through a Unix-domain socket. The daemon exits
-after 15 minutes without a request.
+after 15 minutes without a request. It closes incomplete requests after one
+second.
 
 FSEvents marks the index dirty after a saved file changes. The daemon flushes
 pending events and rebuilds the index before it executes the next request.

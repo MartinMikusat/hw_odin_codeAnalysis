@@ -14,6 +14,7 @@ import "code_analysis:transport"
 import "code_analysis:watcher"
 
 IDLE_TIMEOUT_SECONDS :: 15 * 60
+REQUEST_READ_TIMEOUT :: 1 * time.Second
 
 usage :: proc() {
 	fmt.println(`hw-odin-analyze [--root PATH] [--compact] COMMAND
@@ -271,8 +272,9 @@ run_daemon :: proc(root: string) {
 			continue
 		}
 
-		request_data, received := transport.receive_message(
+		request_data, received := transport.receive_message_with_timeout(
 			client,
+			REQUEST_READ_TIMEOUT,
 			context.temp_allocator,
 		)
 		if !received {

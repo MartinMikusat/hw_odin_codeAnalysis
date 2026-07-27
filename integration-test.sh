@@ -9,8 +9,27 @@ dependency_root=""
 dependency_analyzer=()
 config_root=""
 config_analyzer=()
+timeout_root=""
+timeout_analyzer=()
+partial_client_pid=""
+partial_fifo_open=false
+timeout_status_pid=""
 
 cleanup() {
+  if [[ "$partial_fifo_open" == true ]]; then
+    exec 9>&-
+    partial_fifo_open=false
+  fi
+  if [[ -n "$timeout_status_pid" ]]; then
+    kill "$timeout_status_pid" >/dev/null 2>&1 || true
+    wait "$timeout_status_pid" >/dev/null 2>&1 || true
+    timeout_status_pid=""
+  fi
+  if [[ -n "$partial_client_pid" ]]; then
+    kill "$partial_client_pid" >/dev/null 2>&1 || true
+    wait "$partial_client_pid" >/dev/null 2>&1 || true
+    partial_client_pid=""
+  fi
   "${analyzer[@]}" stop >/dev/null 2>&1 || true
   if [[ -n "$failure_root" ]]; then
     "${failure_analyzer[@]}" stop >/dev/null 2>&1 || true
@@ -24,6 +43,10 @@ cleanup() {
   if [[ -n "$config_root" ]]; then
     "${config_analyzer[@]}" stop >/dev/null 2>&1 || true
     rm -rf -- "$config_root"
+  fi
+  if [[ -n "$timeout_root" ]]; then
+    "${timeout_analyzer[@]}" stop >/dev/null 2>&1 || true
+    rm -rf -- "$timeout_root"
   fi
 }
 trap cleanup EXIT
@@ -267,3 +290,84 @@ if [[ "$config_collection_watched" != true ]]; then
   printf 'expected the replacement watcher to observe the collection\n' >&2
   exit 1
 fi
+
+timeout_root="$(mktemp -d "${TMPDIR:-/tmp}/hw-odin-timeout-XXXXXX")"
+timeout_analyzer=(
+  ./build/hw-odin-analyze
+  --root "$timeout_root"
+  --compact
+)
+printf 'package timeout\n\ntimeout_name :: proc() {}\n' \
+  >"$timeout_root/main.odin"
+
+cache_root="$HOME/Library/Caches/hw_odin_codeAnalysis"
+sockets_before="$(
+  find "$cache_root" -type s -name daemon.sock 2>/dev/null |
+    sort
+)"
+timeout_status="$("${timeout_analyzer[@]}" status)"
+[[ "$timeout_status" == *'"persistent":true'* ]]
+sockets_after="$(
+  find "$cache_root" -type s -name daemon.sock 2>/dev/null |
+    sort
+)"
+timeout_socket=""
+timeout_socket_count=0
+while IFS= read -r candidate; do
+  if [[ -z "$candidate" ]]; then
+    continue
+  fi
+  if ! printf '%s\n' "$sockets_before" | grep -Fqx "$candidate"; then
+    timeout_socket="$candidate"
+    timeout_socket_count=$((timeout_socket_count + 1))
+  fi
+done <<<"$sockets_after"
+if ((timeout_socket_count != 1)); then
+  printf 'expected one new daemon socket, found %d\n' \
+    "$timeout_socket_count" >&2
+  exit 1
+fi
+
+partial_fifo="$timeout_root/partial-client.fifo"
+mkfifo "$partial_fifo"
+nc -U "$timeout_socket" <"$partial_fifo" >/dev/null 2>&1 &
+partial_client_pid=$!
+exec 9>"$partial_fifo"
+partial_fifo_open=true
+printf '\0' >&9
+sleep 0.05
+
+timeout_status_output="$timeout_root/status-output.json"
+timeout_status_error="$timeout_root/status-error.txt"
+"${timeout_analyzer[@]}" status \
+  >"$timeout_status_output" \
+  2>"$timeout_status_error" &
+timeout_status_pid=$!
+timeout_status_completed=false
+for _ in {1..150}; do
+  if ! kill -0 "$timeout_status_pid" >/dev/null 2>&1; then
+    timeout_status_completed=true
+    break
+  fi
+  sleep 0.02
+done
+if [[ "$timeout_status_completed" != true ]]; then
+  printf 'expected status after the incomplete request deadline\n' >&2
+  exit 1
+fi
+if ! wait "$timeout_status_pid"; then
+  timeout_status_pid=""
+  printf 'status failed after the incomplete request:\n' >&2
+  sed -n '1,20p' "$timeout_status_error" >&2
+  exit 1
+fi
+timeout_status_pid=""
+if ! grep -Fq '"persistent":true' "$timeout_status_output"; then
+  printf 'expected a persistent status response after the timeout\n' >&2
+  exit 1
+fi
+
+exec 9>&-
+partial_fifo_open=false
+wait "$partial_client_pid" || true
+partial_client_pid=""

@@ -7,6 +7,7 @@ import "core:os"
 import "core:path/filepath"
 import "core:strings"
 import "core:sys/posix"
+import "core:time"
 
 MAX_MESSAGE_SIZE :: 16 * 1024 * 1024
 LOCK_EX          :: c.int(2)
@@ -180,6 +181,43 @@ receive_all :: proc(socket: posix.FD, data: []byte) -> bool {
 	return true
 }
 
+receive_all_until :: proc(
+	socket: posix.FD,
+	data: []byte,
+	deadline: time.Tick,
+) -> bool {
+	received := uint(0)
+	for received < len(data) {
+		remaining_ns := i64(time.tick_diff(time.tick_now(), deadline))
+		if remaining_ns <= 0 {
+			return false
+		}
+		timeout_ms := c.int(
+			(remaining_ns + i64(time.Millisecond) - 1) /
+			i64(time.Millisecond),
+		)
+		poll_descriptor := posix.pollfd {
+			fd = socket,
+			events = {.IN},
+		}
+		poll_result := posix.poll(&poll_descriptor, 1, timeout_ms)
+		if poll_result <= 0 {
+			return false
+		}
+		count := posix.recv(
+			socket,
+			raw_data(data[received:]),
+			len(data) - received,
+			{},
+		)
+		if count <= 0 {
+			return false
+		}
+		received += uint(count)
+	}
+	return true
+}
+
 send_message :: proc(socket: posix.FD, data: []byte) -> bool {
 	if len(data) > MAX_MESSAGE_SIZE {
 		return false
@@ -194,12 +232,19 @@ send_message :: proc(socket: posix.FD, data: []byte) -> bool {
 	return send_all(socket, header[:]) && send_all(socket, data)
 }
 
-receive_message :: proc(
+receive_message_internal :: proc(
 	socket: posix.FD,
+	deadline: ^time.Tick,
 	allocator := context.allocator,
 ) -> (data: []byte, ok: bool) {
 	header: [4]byte
-	if !receive_all(socket, header[:]) {
+	header_received := false
+	if deadline == nil {
+		header_received = receive_all(socket, header[:])
+	} else {
+		header_received = receive_all_until(socket, header[:], deadline^)
+	}
+	if !header_received {
 		return
 	}
 	length :=
@@ -211,11 +256,35 @@ receive_message :: proc(
 		return
 	}
 	data = make([]byte, int(length), allocator)
-	if length > 0 && !receive_all(socket, data) {
+	data_received := true
+	if length > 0 {
+		if deadline == nil {
+			data_received = receive_all(socket, data)
+		} else {
+			data_received = receive_all_until(socket, data, deadline^)
+		}
+	}
+	if !data_received {
 		delete(data, allocator)
 		data = nil
 		return
 	}
 	ok = true
 	return
+}
+
+receive_message :: proc(
+	socket: posix.FD,
+	allocator := context.allocator,
+) -> (data: []byte, ok: bool) {
+	return receive_message_internal(socket, nil, allocator)
+}
+
+receive_message_with_timeout :: proc(
+	socket: posix.FD,
+	timeout: time.Duration,
+	allocator := context.allocator,
+) -> (data: []byte, ok: bool) {
+	deadline := time.tick_add(time.tick_now(), timeout)
+	return receive_message_internal(socket, &deadline, allocator)
 }
