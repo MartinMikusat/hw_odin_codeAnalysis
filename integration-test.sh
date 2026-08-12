@@ -63,16 +63,31 @@ capability="$({
 [[ "$capability" == *'"status":"available"'* ]]
 [[ "$capability" == *'"source":"odin.core"'* ]]
 
+max_batch="$(jq -nc '{queries:[range(64)|{query:"greet"}]}')"
 mcp="$({
   printf '%s\n' \
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
     '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
     '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"audit_primitives","arguments":{"target_project":".","primitives":[]}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"audit_primitives","arguments":{"target_project":".","primitives":[]}}}' \
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lookup_symbols","arguments":{"queries":[{"query":"greet"}]}}}' \
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"missing_tool","arguments":{}}}' \
+    '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"lookup_symbols","arguments":{"queries":[]}}}' \
+    '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"audit_primitives","arguments":{"target_project":".","primitives":[{"id":"bad","need":"bad constraint","search_terms":[],"generic_requirement":"sometimes"}]}}}'
+  jq -nc --argjson arguments "$max_batch" \
+    '{jsonrpc:"2.0",id:8,method:"tools/call",params:{name:"lookup_symbols",arguments:$arguments}}'
 } | ./build/hw-odin-analyze --root "$root" mcp)"
-[[ "$mcp" == *'"protocolVersion":"2025-11-25"'* ]]
-[[ "$mcp" == *'"name":"audit_primitives"'* ]]
-[[ "$mcp" == *'"structuredContent"'* ]]
+printf '%s\n' "$mcp" | jq -e -s '
+  (map(select(.id == 1))[0].result.protocolVersion == "2025-11-25") and
+  (map(select(.id == 2))[0].result.tools | map(.name) | index("audit_primitives") != null) and
+  (map(select(.id == 2))[0].result.tools | map(.name) | index("lookup_symbols") != null) and
+  (map(select(.id == 3))[0].result.structuredContent.generation == 1) and
+  (map(select(.id == 4))[0].result.structuredContent.results[0][0].name == "greet") and
+  (map(select(.id == 5))[0].error.code == -32602) and
+  (map(select(.id == 6))[0].result.isError == true) and
+  (map(select(.id == 7))[0].result.isError == true) and
+  (map(select(.id == 8))[0].result.structuredContent.results | length == 64)
+' >/dev/null
 
 definition="$("${analyzer[@]}" definition main.odin 15 6)"
 [[ "$definition" == *'"resolution":"Exact"'* ]]
@@ -151,6 +166,19 @@ failure_generation_after="$(
 
 failure_search="$("${failure_analyzer[@]}" search added)"
 [[ "$failure_search" == *'"name":"added"'* ]]
+
+printf 'package fixture\n\ndoomed :: proc() {}\n' >"$failure_root/doomed.odin"
+failure_status="$("${failure_analyzer[@]}" status)"
+failure_generation_before_delete="$(
+  printf '%s' "$failure_status" | jq -r '.generation'
+)"
+rm -- "$failure_root/doomed.odin"
+failure_status="$("${failure_analyzer[@]}" status)"
+failure_generation_after_delete="$(
+  printf '%s' "$failure_status" | jq -r '.generation'
+)"
+((failure_generation_after_delete > failure_generation_before_delete))
+[[ "$("${failure_analyzer[@]}" search doomed)" == '[]' ]]
 
 dependency_root="$(mktemp -d "${TMPDIR:-/tmp}/hw-odin-dependencies-XXXXXX")"
 mkdir -p "$dependency_root/app" "$dependency_root/dep_a" "$dependency_root/dep_b"

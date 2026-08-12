@@ -68,29 +68,83 @@ search :: proc(
 	return result[:]
 }
 
+package_api :: proc(
+	state: ^Analysis_Context,
+	package_query: string,
+	allocator := context.allocator,
+) -> []Symbol {
+	result := make([dynamic]Symbol, allocator)
+	seen := make(map[Symbol_ID]bool, context.temp_allocator)
+	for package_directory, symbol_ids in state.symbols_by_package {
+		matches := package_directory == package_query
+		if !matches {
+			for file_id in state.files_by_package[package_directory] {
+				if state.files[int(file_id)].package_name == package_query {
+					matches = true
+					break
+				}
+			}
+		}
+		if !matches { continue }
+		for symbol_id in symbol_ids {
+			symbol := state.symbols[int(symbol_id)]
+			if symbol.is_global && !seen[symbol.id] {
+				seen[symbol.id] = true
+				append(&result, symbol)
+			}
+		}
+	}
+	slice.sort_by(result[:], symbol_less)
+	return result[:]
+}
+
 location_for_position :: proc(
 	state: ^Analysis_Context,
 	path: string,
 	line, column: int,
 	allocator := context.allocator,
 ) -> Location_Result {
+	active_package := ""
+	if file_id, found := state.files_by_path[path]; found {
+		active_package = state.files[int(file_id)].package_name
+	}
+	visible_imports := imports_for_file(state, path, allocator)
+	scope_chain := make([]string, 5, allocator)
+	copy(scope_chain, []string{"lexical", "file", "package", "imports", "builtins"})
 	if symbol, ok := symbol_at(state, path, line, column); ok {
 		values := make([]Symbol, 1, allocator)
 		values[0] = symbol^
-		return Location_Result{resolution = .Exact, locations = values}
+		return Location_Result{resolution = .Exact, locations = values, active_package = active_package, visible_imports = visible_imports, scope_chain = scope_chain}
 	}
 
 	if occurrence, ok := occurrence_at(state, path, line, column); ok {
 		values := visible_candidates(state, occurrence^, allocator)
 		if len(values) == 1 {
-			return Location_Result{resolution = .Exact, locations = values}
+			return Location_Result{resolution = .Exact, locations = values, active_package = active_package, visible_imports = visible_imports, scope_chain = scope_chain}
 		}
 		if len(values) > 1 {
 			slice.sort_by(values[:], symbol_less)
-			return Location_Result{resolution = .Ambiguous, locations = values}
+			return Location_Result{
+				resolution = .Ambiguous,
+				locations = values,
+				reason = "multiple visible declarations satisfy lexical and import resolution",
+				next_action = "qualify the symbol with its package alias or inspect the competing declarations",
+				active_package = active_package,
+				visible_imports = visible_imports,
+				scope_chain = scope_chain,
+				analyzer_boundary = "overload and polymorphic specialization are not evaluated",
+			}
 		}
 	}
-	return Location_Result{resolution = .Unresolved}
+	return Location_Result{
+		resolution = .Unresolved,
+		reason = "no declaration is visible through the indexed lexical, package, import, or builtin scopes",
+		next_action = "inspect imports and run hw-odin check when conditional files or type inference may supply the declaration",
+		active_package = active_package,
+		visible_imports = visible_imports,
+		scope_chain = scope_chain,
+		analyzer_boundary = "conditional-file evaluation, overload resolution, polymorphic specialization, implicit selectors, and general using behavior are bounded",
+	}
 }
 
 is_type_symbol :: proc(symbol: Symbol) -> bool {
@@ -205,6 +259,7 @@ inspect :: proc(
 		symbols = location.locations,
 		type_definitions = type_location.locations,
 		reference_count = reference_count,
+		explanation = location,
 	}
 }
 
@@ -368,8 +423,10 @@ imports_for_file :: proc(
 		append(&result, ..state.imports[:])
 		return result[:]
 	}
-	for import_index in state.imports_by_path[path] {
-		append(&result, state.imports[import_index])
+	if import_indices, found := state.imports_by_path[path]; found {
+		for import_index in import_indices {
+			append(&result, state.imports[import_index])
+		}
 	}
 	return result[:]
 }

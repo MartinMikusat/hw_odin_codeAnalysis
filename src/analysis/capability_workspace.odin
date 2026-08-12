@@ -6,6 +6,7 @@ import "core:os"
 import "core:path/filepath"
 import "core:slice"
 import "core:strings"
+import "core:time"
 
 Capability_Audit_Builder :: struct {
 	primitive:    Capability_Primitive,
@@ -64,6 +65,29 @@ capability_source_allowed :: proc(primitive: Capability_Primitive, source: strin
 		}
 	}
 	return false
+}
+
+capability_primitive_constraints_valid :: proc(primitive: Capability_Primitive) -> bool {
+	if primitive.kind != "" {
+		valid_kind := false
+		valid_kinds := [8]string{"constant", "variable", "procedure", "procedure_group", "struct", "union", "enum", "documentation"}
+		for kind in valid_kinds {
+			valid_kind = valid_kind || primitive.kind == kind
+		}
+		if !valid_kind { return false }
+	}
+	if primitive.generic_requirement != "" &&
+	   primitive.generic_requirement != "required" &&
+	   primitive.generic_requirement != "forbidden" {
+		return false
+	}
+	valid_sources := [6]string{"odin.base", "odin.core", "odin.vendor", "target_project", "workspace_project", "test_or_fixture"}
+	for source in primitive.allowed_sources {
+		valid := false
+		for candidate in valid_sources { valid = valid || source == candidate }
+		if !valid { return false }
+	}
+	return true
 }
 
 capability_proc_parts :: proc(signature: string) -> (parameters, results: string, ok: bool) {
@@ -149,13 +173,32 @@ Capability_Catalog_Document :: struct {
 Capability_Catalog :: struct {
 	workspace_root: string,
 	odin_root:      string,
+	config_digest:  string,
 	arena:          virtual.Arena,
 	entries:        [dynamic]Capability_Catalog_Entry,
 	documents:      [dynamic]Capability_Catalog_Document,
 	entries_by_name: map[string][dynamic]int,
 	entries_by_token: map[string][dynamic]int,
+	documents_by_token: map[string][dynamic]int,
 	generation:      u64,
+	last_rebuild_nanoseconds: i64,
 	initialized:    bool,
+}
+
+capability_catalog_index_document :: proc(catalog: ^Capability_Catalog, document_index: int) {
+	allocator := virtual.arena_allocator(&catalog.arena)
+	document := catalog.documents[document_index]
+	seen := make(map[string]bool, context.temp_allocator)
+	for token in capability_tokens(document.text, context.temp_allocator) {
+		if len(token) < 2 || seen[token] { continue }
+		seen[token] = true
+		capability_catalog_append_index(
+			&catalog.documents_by_token,
+			strings.clone(token, allocator),
+			document_index,
+			allocator,
+		)
+	}
 }
 
 capability_catalog_destroy :: proc(catalog: ^Capability_Catalog) {
@@ -298,6 +341,28 @@ capability_direct_package :: proc(
 	return relative_path(workspace_root, directory, allocator)
 }
 
+capability_result_metadata :: proc(
+	result: ^Capability_Audit_Result,
+	workspace_root, odin_root: string,
+	last_rebuild_nanoseconds: i64,
+	allocator := context.allocator,
+) {
+	result.compiler_release = strings.clone(filepath.base(odin_root), allocator)
+	result.indexed_roots = make([]string, 4, allocator)
+	result.indexed_roots[0] = strings.clone(workspace_root, allocator)
+	collections := [3]string{"base", "core", "vendor"}
+	for collection, index in collections {
+		result.indexed_roots[index + 1], _ = filepath.join({odin_root, collection}, allocator)
+	}
+	result.excluded_paths = make([]string, 7, allocator)
+	copy(result.excluded_paths, []string{".git", ".cache", ".svelte-kit", "build", "dist", "node_modules", "research/reference-projects"})
+	result.fsevents_flushed = true
+	result.query_scope = strings.clone(workspace_root, allocator)
+	result.result_limit = CAPABILITY_MATCH_LIMIT
+	result.truncated = false
+	result.last_rebuild_nanoseconds = last_rebuild_nanoseconds
+}
+
 capability_direct_exact :: proc(
 	primitive: Capability_Primitive,
 	name, package_value: string,
@@ -389,6 +454,9 @@ capability_direct_consider :: proc(
 	for reason_index in 0 ..< reason_count {
 		match_reasons[reason_index] = strings.clone(reasons[reason_index], allocator)
 	}
+	unknown_properties := make([]string, 2, allocator)
+	unknown_properties[0] = "allocation_behavior"
+	unknown_properties[1] = "ownership"
 	match := Capability_Match {
 		name = strings.clone(name, allocator),
 		kind = strings.clone(kind, allocator),
@@ -408,7 +476,7 @@ capability_direct_consider :: proc(
 		platform = strings.clone(platform, allocator),
 		allocation_behavior = "unknown",
 		ownership = "unknown",
-		unknown_properties = []string{"allocation_behavior", "ownership"},
+		unknown_properties = unknown_properties,
 		rank = rank,
 		reasons = match_reasons,
 	}
@@ -655,6 +723,7 @@ capability_scan_document :: proc(
 				text = strings.clone(text, catalog_allocator),
 			},
 		)
+		capability_catalog_index_document(catalog, len(catalog.documents) - 1)
 		delete(package_value)
 		delete(file)
 	}
@@ -803,6 +872,7 @@ capability_audit_workspace :: proc(
 
 	result.target_project = strings.clone(input.target_project, allocator)
 	result.compiler_root = strings.clone(odin_root, allocator)
+	capability_result_metadata(&result, workspace_root, odin_root, 0, allocator)
 	result.results = make([]Capability_Primitive_Result, len(input.primitives), allocator)
 	if len(input.primitives) == 0 {
 		return result, "", true
@@ -812,6 +882,9 @@ capability_audit_workspace :: proc(
 	for primitive, index in input.primitives {
 		if strings.trim_space(primitive.id) == "" || strings.trim_space(primitive.need) == "" {
 			return {}, "each primitive requires id and need", false
+		}
+		if !capability_primitive_constraints_valid(primitive) {
+			return {}, "primitive constraints contain an unsupported value", false
 		}
 		query_text := strings.join(primitive.search_terms, " ", allocator)
 		query_text = strings.join({primitive.need, " ", query_text}, "", allocator)
@@ -870,6 +943,7 @@ capability_catalog_init :: proc(
 	catalog: ^Capability_Catalog,
 	workspace_root: string,
 ) -> (error_message: string, ok: bool) {
+	started := time.tick_now()
 	if catalog == nil {
 		return "capability catalog is required", false
 	}
@@ -885,10 +959,16 @@ capability_catalog_init :: proc(
 		return "failed to resolve the active Odin compiler root", false
 	}
 	catalog.odin_root = strings.clone(odin_root, allocator)
+	config, digest, config_ok := load_config(workspace_root, context.temp_allocator)
+	if config_ok {
+		catalog.config_digest = strings.clone(digest, allocator)
+		config_destroy(&config, context.temp_allocator)
+	}
 	catalog.entries = make([dynamic]Capability_Catalog_Entry, allocator)
 	catalog.documents = make([dynamic]Capability_Catalog_Document, allocator)
 	catalog.entries_by_name = make(map[string][dynamic]int, allocator = allocator)
 	catalog.entries_by_token = make(map[string][dynamic]int, allocator = allocator)
+	catalog.documents_by_token = make(map[string][dynamic]int, allocator = allocator)
 	catalog.generation = 1
 	if scan_error, scan_ok := capability_scan_root(
 		workspace_root,
@@ -918,6 +998,7 @@ capability_catalog_init :: proc(
 			return scan_error, false
 		}
 	}
+	catalog.last_rebuild_nanoseconds = i64(time.tick_since(started))
 	return "", true
 }
 
@@ -1006,10 +1087,21 @@ capability_audit_catalog :: proc(
 	result.target_project = strings.clone(input.target_project, allocator)
 	result.compiler_root = strings.clone(catalog.odin_root, allocator)
 	result.generation = catalog.generation
+	result.config_digest = strings.clone(catalog.config_digest, allocator)
+	capability_result_metadata(
+		&result,
+		catalog.workspace_root,
+		catalog.odin_root,
+		catalog.last_rebuild_nanoseconds,
+		allocator,
+	)
 	result.results = make([]Capability_Primitive_Result, len(input.primitives), allocator)
 	for primitive, primitive_index in input.primitives {
 		if strings.trim_space(primitive.id) == "" || strings.trim_space(primitive.need) == "" {
 			return {}, "each primitive requires id and need", false
+		}
+		if !capability_primitive_constraints_valid(primitive) {
+			return {}, "primitive constraints contain an unsupported value", false
 		}
 		query_text := strings.join(primitive.search_terms, " ", context.temp_allocator)
 		query_text = strings.join({primitive.need, " ", query_text}, "", context.temp_allocator)
@@ -1061,7 +1153,14 @@ capability_audit_catalog :: proc(
 				allocator,
 			)
 		}
-		for document in catalog.documents {
+		candidate_documents := make(map[int]bool, context.temp_allocator)
+		for token in builder.query_tokens {
+			if document_indices, found := catalog.documents_by_token[token]; found {
+				for document_index in document_indices { candidate_documents[document_index] = true }
+			}
+		}
+		for document_index in candidate_documents {
+			document := catalog.documents[document_index]
 			capability_catalog_consider_document(
 				&builder,
 				document,

@@ -933,6 +933,33 @@ using_imports_follow_scope_and_ambiguity :: proc(t: ^testing.T) {
 }
 
 @(test)
+nested_shadowing_and_sibling_procedures_resolve_nearest_scope :: proc(t: ^testing.T) {
+	state, ok := fixture_context_at("tests/fixtures/scopes")
+	testing.expect(t, ok)
+	if !ok { return }
+	defer analysis.context_destroy(&state)
+
+	nested := analysis.location_for_position(&state, "nested/main.odin", 9, 7, context.temp_allocator)
+	testing.expect_value(t, nested.resolution, analysis.Resolution_Kind.Exact)
+	testing.expect_value(t, nested.locations[0].range.start.line, 8)
+
+	outer := analysis.location_for_position(&state, "nested/main.odin", 11, 6, context.temp_allocator)
+	testing.expect_value(t, outer.resolution, analysis.Resolution_Kind.Exact)
+	testing.expect_value(t, outer.locations[0].range.start.line, 6)
+
+	sibling := analysis.location_for_position(&state, "nested/main.odin", 15, 6, context.temp_allocator)
+	testing.expect_value(t, sibling.resolution, analysis.Resolution_Kind.Exact)
+	testing.expect_value(t, sibling.locations[0].range.start.line, 3)
+
+	alpha_field := analysis.location_for_position(&state, "nested/main.odin", 22, 12, context.temp_allocator)
+	beta_field := analysis.location_for_position(&state, "nested/main.odin", 23, 11, context.temp_allocator)
+	testing.expect_value(t, alpha_field.resolution, analysis.Resolution_Kind.Exact)
+	testing.expect_value(t, beta_field.resolution, analysis.Resolution_Kind.Exact)
+	testing.expect_value(t, alpha_field.locations[0].owner_type, "Alpha")
+	testing.expect_value(t, beta_field.locations[0].owner_type, "Beta")
+}
+
+@(test)
 builtins_are_navigable_and_read_only :: proc(t: ^testing.T) {
 	state, ok := fixture_context_at("tests/fixtures/scopes")
 	testing.expect(t, ok)

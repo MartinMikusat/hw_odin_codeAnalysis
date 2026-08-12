@@ -18,7 +18,17 @@ Collect_State :: struct {
 	call_offsets:   map[int]bool,
 	field_kinds:    map[^ast.Field]Symbol_Kind,
 	field_owners:   map[^ast.Field]string,
+	node_stack:     [dynamic]^ast.Node,
 	collect_occurrences: bool,
+}
+
+collector_scope_extent :: proc(collector: ^Collect_State) -> Source_Range {
+	for index := len(collector.node_stack) - 1; index >= 0; index -= 1 {
+		if block, ok := collector.node_stack[index].derived.(^ast.Block_Stmt); ok {
+			return range_from_node(cast(^ast.Node)block)
+		}
+	}
+	return {}
 }
 
 position_from_ast :: proc(line, column, offset: int) -> Source_Position {
@@ -620,6 +630,11 @@ add_value_symbols :: proc(collector: ^Collect_State, decl: ^ast.Value_Decl) {
 			),
 			is_global = is_global,
 		}
+		if !is_global {
+			if scope_extent := collector_scope_extent(collector); scope_extent.end.offset > scope_extent.start.offset {
+				symbol.extent = scope_extent
+			}
+		}
 		append(&collector.analysis.symbols, symbol)
 	}
 }
@@ -664,9 +679,12 @@ add_field_symbols :: proc(collector: ^Collect_State, field: ^ast.Field) {
 
 collect_visit :: proc(visitor: ^ast.Visitor, node: ^ast.Node) -> ^ast.Visitor {
 	if node == nil {
+		collector := cast(^Collect_State)visitor.data
+		if len(collector.node_stack) > 0 { pop(&collector.node_stack) }
 		return visitor
 	}
 	collector := cast(^Collect_State)visitor.data
+	append(&collector.node_stack, node)
 	#partial switch value in node.derived {
 	case ^ast.Value_Decl:
 		add_value_symbols(collector, value)
@@ -802,6 +820,7 @@ collect_file :: proc(
 		call_offsets = make(map[int]bool, context.temp_allocator),
 		field_kinds = make(map[^ast.Field]Symbol_Kind, context.temp_allocator),
 		field_owners = make(map[^ast.Field]string, context.temp_allocator),
+		node_stack = make([dynamic]^ast.Node, context.temp_allocator),
 		collect_occurrences = collect_occurrences,
 	}
 	visitor := ast.Visitor{visit = collect_visit, data = &collector}

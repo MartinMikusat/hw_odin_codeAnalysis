@@ -157,6 +157,11 @@ resolve_occurrence :: proc(
 				continue
 			}
 		}
+		if symbol.kind != .Parameter &&
+		   (occurrence.range.start.offset < symbol.extent.start.offset ||
+		    occurrence.range.start.offset >= symbol.extent.end.offset) {
+			continue
+		}
 		if symbol.range.start.offset <= occurrence.range.start.offset &&
 		   symbol.range.start.offset > best_offset {
 			best_local = symbol.id

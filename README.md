@@ -75,7 +75,7 @@ printf '%s\n' '{
 }' | hw-odin-analyze --root /Users/martin/projects/main capability-audit
 ```
 
-The audit scans the active compiler's complete `base`, `core`, and `vendor` trees plus every non-excluded workspace source and documentation file. An exact case-normalized symbol or qualified-name match returns `available`; token overlap returns `candidate`; no indexed match returns `not_found`. A `not_found` result is search evidence, not a semantic proof that no implementation exists.
+The MCP server retains indexes for the active compiler's complete `base`, `core`, and `vendor` trees plus every non-excluded workspace source and documentation file. An exact case-normalized symbol or qualified-name match returns `available`; token overlap returns `candidate`; no indexed match returns `not_found`. A `not_found` result is bounded search evidence.
 
 Start the newline-delimited JSON-RPC MCP transport with:
 
@@ -83,7 +83,7 @@ Start the newline-delimited JSON-RPC MCP transport with:
 hw-odin-analyze --root /Users/martin/projects/main mcp
 ```
 
-The server negotiates MCP protocol `2025-11-25` and publishes one tool, `audit_primitives`. Tool results include both `structuredContent` and a JSON text fallback.
+The server negotiates MCP protocol `2025-11-25`. It publishes batched tools for capability audits, symbol lookup and inspection, definitions and references, call graphs, outlines, package APIs, imports, diagnostics, impact analysis, and checked rename plans. Tool results include `structuredContent`, a JSON text fallback, generation identity, compiler identity, indexed roots, exclusions, scope, limits, and truncation state.
 
 `rename` returns a checked edit plan. It does not write source files.
 
@@ -128,10 +128,14 @@ expressions can return `Ambiguous` or `Unresolved`. Run `diagnostics` or
 ## Performance
 
 Run `./benchmark.sh` to measure the local fixture. On an Apple Silicon
-development machine, version `0.1.0` measured:
+development machine, version `0.3.0` measured on 2026-08-12:
 
 - Warm definition query: 2.4 ms mean across 100 runs.
 - Cold daemon startup and initial index: 16.0 ms mean across 10 runs.
+- Cold capability-catalog construction: 653.9 ms.
+- Warm indexed capability audit: 14.41 ms median across 30 runs.
+- Equivalent fresh `rg` scan of Odin `core`: 21.91 ms median across 30 runs.
+- Warm MCP speedup over the regular source scan: 1.52× median.
 
 The values include process startup, socket transport, JSON encoding, and
 FSEvents synchronization.

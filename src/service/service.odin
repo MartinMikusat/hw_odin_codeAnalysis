@@ -8,7 +8,7 @@ import "core:sys/posix"
 
 import "code_analysis:analysis"
 
-VERSION :: "0.2.0"
+VERSION :: "0.3.0"
 
 Request :: struct {
 	version:   int,
@@ -108,6 +108,15 @@ execute :: proc(
 		}
 		payload, ok = encode(
 			analysis.search(state, arguments[0], context.temp_allocator),
+			request.compact,
+			allocator,
+		)
+	case "package-api":
+		if len(arguments) != 1 {
+			return Response{error = "package-api requires PACKAGE"}
+		}
+		payload, ok = encode(
+			analysis.package_api(state, arguments[0], context.temp_allocator),
 			request.compact,
 			allocator,
 		)

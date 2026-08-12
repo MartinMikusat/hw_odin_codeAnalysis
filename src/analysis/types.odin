@@ -106,7 +106,16 @@ Capability_Primitive_Result :: struct {
 Capability_Audit_Result :: struct {
 	target_project: string,
 	compiler_root:  string,
+	compiler_release: string,
+	config_digest: string,
 	generation:     u64,
+	indexed_roots: []string,
+	excluded_paths: []string,
+	fsevents_flushed: bool,
+	query_scope: string,
+	result_limit: int,
+	truncated: bool,
+	last_rebuild_nanoseconds: i64,
 	results:        []Capability_Primitive_Result,
 }
 
@@ -155,6 +164,14 @@ Text_Edit :: struct {
 Location_Result :: struct {
 	resolution: Resolution_Kind,
 	locations:  []Symbol,
+	reason: string,
+	next_action: string,
+	active_package: string,
+	visible_imports: []Import,
+	scope_chain: []string,
+	shadowing_declarations: []Symbol,
+	rejected_candidates: []Symbol,
+	analyzer_boundary: string,
 }
 
 Inspect_Result :: struct {
@@ -162,6 +179,7 @@ Inspect_Result :: struct {
 	symbols:         []Symbol,
 	type_definitions: []Symbol,
 	reference_count: int,
+	explanation: Location_Result,
 }
 
 Status :: struct {

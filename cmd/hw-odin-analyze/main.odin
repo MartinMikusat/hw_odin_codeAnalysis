@@ -212,7 +212,57 @@ MCP_PROTOCOL_VERSION :: "2025-11-25"
 
 MCP_Request_Params :: struct {
 	name:      string,
-	arguments: analysis.Capability_Audit_Input,
+	arguments: json.Value,
+}
+
+MCP_Query :: struct {
+	query: string,
+	symbol_id: int,
+	generation: u64,
+	file: string,
+	line: int,
+	column: int,
+	new_name: string,
+	scope: string,
+}
+
+MCP_Query_Input :: struct {
+	queries: []MCP_Query,
+}
+
+MCP_Batch_Result :: struct {
+	generation: u64,
+	config_digest: string,
+	compiler_release: string,
+	compiler_root: string,
+	indexed_roots: []string,
+	excluded_paths: []string,
+	fsevents_flushed: bool,
+	query_scope: string,
+	result_limit: int,
+	truncated: bool,
+	results: []json.Value,
+}
+
+MCP_Definition_References :: struct {
+	definition: json.Value,
+	references: json.Value,
+}
+
+MCP_Call_Graph :: struct {
+	callers: json.Value,
+	callees: json.Value,
+}
+
+MCP_Impact :: struct {
+	definition: json.Value,
+	references: json.Value,
+	callers: json.Value,
+	callees: json.Value,
+	imports: json.Value,
+	affected_packages: []string,
+	relevant_tests: []string,
+	configuration_files: []string,
 }
 
 MCP_Request :: struct {
@@ -256,6 +306,16 @@ MCP_Call_Response :: struct {
 	result:  MCP_Call_Result,
 }
 
+MCP_Tool :: struct {
+	name: string,
+	description: string,
+	input_schema: json.Value `json:"inputSchema"`,
+}
+
+MCP_Tool_List :: struct {
+	tools: []MCP_Tool,
+}
+
 mcp_write :: proc(value: any) {
 	data, marshal_error := json.marshal(value, allocator = context.temp_allocator)
 	if marshal_error != nil {
@@ -274,6 +334,178 @@ mcp_parse_value :: proc(source: string) -> (json.Value, bool) {
 		return {}, false
 	}
 	return value, true
+}
+
+mcp_decode_arguments :: proc(value: json.Value, destination: ^$T) -> bool {
+	data, marshal_error := json.marshal(value, allocator = context.temp_allocator)
+	if marshal_error != nil {
+		return false
+	}
+	return json.unmarshal(data, destination, allocator = context.temp_allocator) == nil
+}
+
+mcp_execute_query :: proc(
+	state: ^analysis.Analysis_Context,
+	command: string,
+	input_query: MCP_Query,
+) -> (json.Value, string, bool) {
+	query := input_query
+	if query.generation != 0 && query.generation != state.generation {
+		return {}, "query generation does not match the published index", false
+	}
+	if query.symbol_id > 0 {
+		if query.symbol_id >= len(state.symbols) {
+			return {}, "symbol_id is outside the published generation", false
+		}
+		symbol := state.symbols[query.symbol_id]
+		query.file = symbol.path
+		query.line = symbol.range.start.line
+		query.column = symbol.range.start.column
+	}
+	arguments := make([dynamic]string, context.temp_allocator)
+	switch command {
+	case "search", "package-api":
+		if strings.trim_space(query.query) == "" { return {}, "query is required", false }
+		append(&arguments, query.query)
+	case "outline", "imports", "diagnostics":
+		target := query.file
+		if query.scope == "workspace" { target = "--workspace" }
+		if target == "" { return {}, "file or workspace scope is required", false }
+		append(&arguments, target)
+	case "rename":
+		if query.file == "" || query.line <= 0 || query.column <= 0 || query.new_name == "" {
+			return {}, "file, positive line and column, and new_name are required", false
+		}
+		append(&arguments, query.file, fmt.aprintf("%d", query.line), fmt.aprintf("%d", query.column), query.new_name)
+	case:
+		if query.file == "" || query.line <= 0 || query.column <= 0 {
+			return {}, "file and positive line and column are required", false
+		}
+		append(&arguments, query.file, fmt.aprintf("%d", query.line), fmt.aprintf("%d", query.column))
+	}
+	response := service.execute(
+		state,
+		service.Request{version = 1, command = command, arguments = arguments[:], compact = true},
+		persistent = true,
+		allocator = context.temp_allocator,
+	)
+	if !response.ok { return {}, response.error, false }
+	value, parsed := mcp_parse_value(response.payload)
+	if !parsed { return {}, "failed to decode analysis result", false }
+	return value, "", true
+}
+
+mcp_composite_value :: proc(value: any) -> (json.Value, bool) {
+	data, marshal_error := json.marshal(value, allocator = context.temp_allocator)
+	if marshal_error != nil { return {}, false }
+	return mcp_parse_value(string(data))
+}
+
+mcp_execute_composite :: proc(
+	state: ^analysis.Analysis_Context,
+	mode: string,
+	query: MCP_Query,
+) -> (json.Value, string, bool) {
+	if mode == "definition_and_references" {
+		definition, error, ok := mcp_execute_query(state, "definition", query); if !ok { return {}, error, false }
+		references, error_2, ok_2 := mcp_execute_query(state, "references", query); if !ok_2 { return {}, error_2, false }
+		value, encoded := mcp_composite_value(MCP_Definition_References{definition = definition, references = references})
+		return value, "failed to encode definition and references", encoded
+	}
+	if mode == "call_graph" {
+		callers, error, ok := mcp_execute_query(state, "callers", query); if !ok { return {}, error, false }
+		callees, error_2, ok_2 := mcp_execute_query(state, "callees", query); if !ok_2 { return {}, error_2, false }
+		value, encoded := mcp_composite_value(MCP_Call_Graph{callers = callers, callees = callees})
+		return value, "failed to encode call graph", encoded
+	}
+	definition, error, ok := mcp_execute_query(state, "definition", query); if !ok { return {}, error, false }
+	references, error_2, ok_2 := mcp_execute_query(state, "references", query); if !ok_2 { return {}, error_2, false }
+	callers, error_3, ok_3 := mcp_execute_query(state, "callers", query); if !ok_3 { return {}, error_3, false }
+	callees, error_4, ok_4 := mcp_execute_query(state, "callees", query); if !ok_4 { return {}, error_4, false }
+	imports, error_5, ok_5 := mcp_execute_query(state, "imports", query); if !ok_5 { return {}, error_5, false }
+	affected_packages := make([dynamic]string, context.temp_allocator)
+	relevant_tests := make([dynamic]string, context.temp_allocator)
+	seen_packages := make(map[string]bool, context.temp_allocator)
+	seen_tests := make(map[string]bool, context.temp_allocator)
+	target, target_ok := analysis.symbol_at(state, query.file, query.line, query.column)
+	if target_ok {
+		for occurrence_index in state.occurrences_by_symbol[target.id] {
+			occurrence := state.occurrences[occurrence_index]
+			if !seen_packages[occurrence.package_name] {
+				seen_packages[occurrence.package_name] = true
+				append(&affected_packages, occurrence.package_name)
+			}
+			if (strings.contains(occurrence.path, "/test/") || strings.contains(occurrence.path, "/tests/") || strings.has_suffix(occurrence.path, "_test.odin")) && !seen_tests[occurrence.path] {
+				seen_tests[occurrence.path] = true
+				append(&relevant_tests, occurrence.path)
+			}
+		}
+	}
+	configuration_files := make([dynamic]string, context.temp_allocator)
+	config_path, _ := filepath.join({state.root, "code-analysis.json"}, context.temp_allocator)
+	if os.exists(config_path) { append(&configuration_files, config_path) }
+	value, encoded := mcp_composite_value(MCP_Impact{
+		definition = definition,
+		references = references,
+		callers = callers,
+		callees = callees,
+		imports = imports,
+		affected_packages = affected_packages[:],
+		relevant_tests = relevant_tests[:],
+		configuration_files = configuration_files[:],
+	})
+	return value, "failed to encode impact analysis", encoded
+}
+
+mcp_run_batch :: proc(
+	id: json.Value,
+	state: ^analysis.Analysis_Context,
+	arguments: json.Value,
+	command: string,
+) {
+	input: MCP_Query_Input
+	if !mcp_decode_arguments(arguments, &input) {
+		mcp_write_call_result(id, "invalid query batch", true)
+		return
+	}
+	if len(input.queries) == 0 || len(input.queries) > 64 {
+		mcp_write_call_result(id, "queries must contain between 1 and 64 entries", true)
+		return
+	}
+	results := make([]json.Value, len(input.queries), context.temp_allocator)
+	for query, index in input.queries {
+		value: json.Value
+		query_error: string
+		query_ok: bool
+		if command == "definition_and_references" || command == "call_graph" || command == "impact_analysis" {
+			value, query_error, query_ok = mcp_execute_composite(state, command, query)
+		} else {
+			value, query_error, query_ok = mcp_execute_query(state, command, query)
+		}
+		if !query_ok {
+			mcp_write_call_result(id, query_error, true)
+			return
+		}
+		results[index] = value
+	}
+	payload, marshal_error := json.marshal(
+		MCP_Batch_Result{
+			generation = state.generation,
+			config_digest = state.config_digest,
+			compiler_release = filepath.base(state.odin_root),
+			compiler_root = state.odin_root,
+			indexed_roots = state.watch_roots[:],
+			excluded_paths = state.config.exclude_paths,
+			fsevents_flushed = true,
+			query_scope = state.root,
+			result_limit = 64,
+			truncated = false,
+			results = results,
+		},
+		allocator = context.temp_allocator,
+	)
+	if marshal_error != nil { mcp_write_error(id, -32603, "failed to encode batch result"); return }
+	mcp_write_call_result(id, string(payload))
 }
 
 mcp_write_result :: proc(id: json.Value, source: string) {
@@ -317,6 +549,11 @@ mcp_write_call_result :: proc(
 }
 
 run_mcp :: proc(root: string) {
+	state: analysis.Analysis_Context
+	if !analysis.context_init(&state, root) {
+		fail("failed to build the initial analysis index")
+	}
+	defer analysis.context_destroy(&state)
 	catalog: analysis.Capability_Catalog
 	if catalog_error, catalog_ok := analysis.capability_catalog_init(&catalog, root); !catalog_ok {
 		fail(catalog_error)
@@ -336,6 +573,8 @@ run_mcp :: proc(root: string) {
 		fail("failed to start the capability catalog watcher")
 	}
 	defer watcher.stop(&catalog_watcher)
+	watcher.flush(&catalog_watcher)
+	_ = watcher.consume_dirty(&catalog_watcher)
 	scanner: bufio.Scanner
 	bufio.scanner_init(&scanner, os.to_stream(os.stdin))
 	defer bufio.scanner_destroy(&scanner)
@@ -344,12 +583,19 @@ run_mcp :: proc(root: string) {
 		watcher.flush(&catalog_watcher)
 		if watcher.consume_dirty(&catalog_watcher) {
 			candidate: analysis.Capability_Catalog
-			if _, candidate_ok := analysis.capability_catalog_init(&candidate, root); candidate_ok {
+			analysis_candidate: analysis.Analysis_Context
+			catalog_ok := false
+			_, catalog_ok = analysis.capability_catalog_init(&candidate, root)
+			analysis_ok := analysis.context_build_candidate(&state, &analysis_candidate)
+			if catalog_ok && analysis_ok {
 				candidate.generation = catalog.generation + 1
 				previous := catalog
 				catalog = candidate
 				analysis.capability_catalog_destroy(&previous)
+				analysis.context_publish_candidate(&state, &analysis_candidate)
 			} else {
+				if catalog_ok { analysis.capability_catalog_destroy(&candidate) }
+				if analysis_ok { analysis.context_destroy(&analysis_candidate) }
 				watcher.mark_dirty(&catalog_watcher)
 			}
 		}
@@ -374,40 +620,55 @@ run_mcp :: proc(root: string) {
 		case "initialize":
 			mcp_write_result(
 				request.id,
-				`{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"hw-odin-analyze","version":"0.2.0"}}`,
+				`{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"hw-odin-analyze","version":"0.3.0"}}`,
 			)
 		case "notifications/initialized":
 			continue
 		case "ping":
 			mcp_write_result(request.id, `{}`)
 		case "tools/list":
-			mcp_write_result(
-				request.id,
-				`{"tools":[{"name":"audit_primitives","title":"Audit Odin primitives","description":"Checks up to 64 planned implementation primitives against the active Odin base/core/vendor libraries and every non-excluded Odin workspace project in one deterministic query. Exact normalized symbols are available; ranked overlaps are candidates; not_found is limited to the indexed search.","inputSchema":{"type":"object","additionalProperties":false,"required":["target_project","primitives"],"properties":{"target_project":{"type":"string","minLength":1,"description":"Workspace-relative project directory."},"primitives":{"type":"array","maxItems":64,"items":{"type":"object","additionalProperties":false,"required":["id","need","search_terms"],"properties":{"id":{"type":"string","minLength":1},"need":{"type":"string","minLength":1},"search_terms":{"type":"array","items":{"type":"string","minLength":1}}}}}}}}]}`,
-			)
+			audit_schema, _ := mcp_parse_value(`{"type":"object","additionalProperties":false,"required":["target_project","primitives"],"properties":{"target_project":{"type":"string","minLength":1},"primitives":{"type":"array","maxItems":64,"items":{"type":"object","required":["id","need","search_terms"]}}}}`)
+			batch_schema, _ := mcp_parse_value(`{"type":"object","additionalProperties":false,"required":["queries"],"properties":{"queries":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"object","additionalProperties":false,"properties":{"query":{"type":"string"},"symbol_id":{"type":"integer","minimum":1},"generation":{"type":"integer","minimum":1},"file":{"type":"string"},"line":{"type":"integer","minimum":1},"column":{"type":"integer","minimum":1},"new_name":{"type":"string"},"scope":{"enum":["workspace"]}}}}}}`)
+			tools := [11]MCP_Tool{
+				{name = "audit_primitives", description = "Find reusable Odin capabilities in retained workspace and standard-library indexes.", input_schema = audit_schema},
+				{name = "lookup_symbols", description = "Batch exact or fuzzy symbol searches.", input_schema = batch_schema},
+				{name = "inspect_symbol", description = "Batch symbol inspections at source positions.", input_schema = batch_schema},
+				{name = "definition_and_references", description = "Batch definition and complete indexed reference queries.", input_schema = batch_schema},
+				{name = "call_graph", description = "Batch direct caller and callee queries.", input_schema = batch_schema},
+				{name = "file_outline", description = "Batch ordered file outlines.", input_schema = batch_schema},
+				{name = "package_api", description = "Batch public package API queries.", input_schema = batch_schema},
+				{name = "imports", description = "Batch resolved import queries.", input_schema = batch_schema},
+				{name = "diagnostics", description = "Batch compiler-authoritative diagnostic queries.", input_schema = batch_schema},
+				{name = "impact_analysis", description = "Batch read-only symbol impact queries.", input_schema = batch_schema},
+				{name = "rename", description = "Batch checked non-mutating rename plans.", input_schema = batch_schema},
+			}
+			tool_value, encoded := mcp_composite_value(MCP_Tool_List{tools = tools[:]})
+			if !encoded { mcp_write_error(request.id, -32603, "failed to encode tool list"); continue }
+			mcp_write(MCP_Response{jsonrpc = "2.0", id = request.id, result = tool_value})
 		case "tools/call":
-			if request.params.name != "audit_primitives" {
-				mcp_write_error(request.id, -32602, "unknown tool name")
-				continue
+			switch request.params.name {
+			case "audit_primitives":
+				input: analysis.Capability_Audit_Input
+				if !mcp_decode_arguments(request.params.arguments, &input) {
+					mcp_write_call_result(request.id, "invalid capability audit input", true); continue
+				}
+				result, audit_error, audit_ok := analysis.capability_audit_catalog(&catalog, input, allocator = context.temp_allocator)
+				if !audit_ok { mcp_write_call_result(request.id, audit_error, true); continue }
+				payload, marshal_error := json.marshal(result, allocator = context.temp_allocator)
+				if marshal_error != nil { mcp_write_error(request.id, -32603, "failed to encode capability result"); continue }
+				mcp_write_call_result(request.id, string(payload))
+			case "lookup_symbols": mcp_run_batch(request.id, &state, request.params.arguments, "search")
+			case "inspect_symbol": mcp_run_batch(request.id, &state, request.params.arguments, "inspect")
+			case "definition_and_references": mcp_run_batch(request.id, &state, request.params.arguments, "definition_and_references")
+			case "call_graph": mcp_run_batch(request.id, &state, request.params.arguments, "call_graph")
+			case "file_outline": mcp_run_batch(request.id, &state, request.params.arguments, "outline")
+			case "package_api": mcp_run_batch(request.id, &state, request.params.arguments, "package-api")
+			case "imports": mcp_run_batch(request.id, &state, request.params.arguments, "imports")
+			case "diagnostics": mcp_run_batch(request.id, &state, request.params.arguments, "diagnostics")
+			case "impact_analysis": mcp_run_batch(request.id, &state, request.params.arguments, "impact_analysis")
+			case "rename": mcp_run_batch(request.id, &state, request.params.arguments, "rename")
+			case: mcp_write_error(request.id, -32602, "unknown tool name")
 			}
-			result, audit_error, audit_ok := analysis.capability_audit_catalog(
-				&catalog,
-				request.params.arguments,
-				allocator = context.temp_allocator,
-			)
-			if !audit_ok {
-				mcp_write_call_result(request.id, audit_error, true)
-				continue
-			}
-			payload, marshal_error := json.marshal(
-				result,
-				allocator = context.temp_allocator,
-			)
-			if marshal_error != nil {
-				mcp_write_error(request.id, -32603, "failed to encode capability result")
-				continue
-			}
-			mcp_write_call_result(request.id, string(payload))
 		case:
 			mcp_write_error(request.id, -32601, "method not found")
 		}

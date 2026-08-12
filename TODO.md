@@ -2,6 +2,20 @@
 
 Work in the order below. Build the persistent indexes and test boundaries before expanding the MCP surface, then make reuse results directly actionable before adding broader navigation and refactoring queries.
 
+## Completed in 0.3.0
+
+- [x] Retain generation-owned semantic, capability, source, and documentation indexes across MCP requests; rebuild candidates on FSEvents and publish complete generations atomically.
+- [x] Return executable reuse recipes with complete signatures, import and qualified names, excerpts, source ownership, platform restrictions, unknown semantic properties, generation, compiler identity, and rank reasons.
+- [x] Apply kind, parameter, result, generic, platform, source-class, allocation, and ownership constraints before lexical ranking; unknown allocation or ownership data cannot satisfy a requested constraint.
+- [x] Expose batched symbol lookup, inspection, definitions and references, caller and callee graphs, outlines, package APIs, imports, diagnostics, impact summaries, and checked rename plans through MCP.
+- [x] Bind stable symbol IDs and checked edit plans to a published generation, and reject stale generation inputs.
+- [x] Return structured ambiguity and unresolved explanations with package, imports, scope chain, analyzer boundary, and a concrete next action.
+- [x] Report generation, configuration digest, compiler release and root, indexed roots, exclusions, FSEvents flush state, scope, limits, and truncation state.
+- [x] Cover transactional rebuild failure, file deletion, nested shadowing, sibling procedures, using-import ambiguity, typed MCP errors, empty and maximum batches, and JSON field-level integration assertions.
+- [x] Record cold catalog and warm query performance in `benchmark.sh`; the 2026-08-12 run measured a 14.41 ms warm median versus 21.91 ms for an equivalent fresh `rg` scan of Odin `core` (1.52× faster).
+
+The sections below preserve the completed acceptance contract. No implementation item remains open; deferred product expansions remain excluded at the end of this file.
+
 ## P1 — Persistent analysis foundation
 
 ### 1. Unify capability auditing on persistent indexes
