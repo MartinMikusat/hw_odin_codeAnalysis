@@ -2,6 +2,14 @@
 
 Work in the order below. Build the persistent indexes and test boundaries before expanding the MCP surface, then make reuse results directly actionable before adding broader navigation and refactoring queries.
 
+## Completed in 0.4.0
+
+- [x] Record every MCP input line and emitted response line in a global SQLite database, with session, workspace, client, compiler, configuration, outcome, latency, batch, result, resolution, truncation, byte-count, and SHA-256 metadata.
+- [x] Keep MCP execution available when SQLite cannot open or write: retry after a bounded interval, throttle stderr diagnostics, and insert a synthetic gap event after recovery.
+- [x] Retain event metrics indefinitely, remove request and response payload rows after 90 days, and run bounded incremental vacuum work once per day.
+- [x] Add read-only `usage status`, `usage summary`, and `usage recent` reports with workspace, tool, time-window, and row-limit filters; require `--include-payloads` before returning stored input or output.
+- [x] Cover exact payload capture, client and compiler-context session attribution, aggregate reports, strict payload redaction, UTF-8 and base64 display, retention, override-directory permission preservation, logging failure and recovery, atomic batch metrics, structural resolution counts, MCP failure isolation, and concurrent MCP writers.
+
 ## Completed in 0.3.0
 
 - [x] Retain generation-owned semantic, capability, source, and documentation indexes across MCP requests; rebuild candidates on FSEvents and publish complete generations atomically.

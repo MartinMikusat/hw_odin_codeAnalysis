@@ -14,7 +14,7 @@ The project analyzes saved Odin source files for terminal agents and exposes cap
 
 The implementation targets macOS on Apple Silicon and the active monthly compiler managed by `hw-odin`.
 
-See [`TODO.md`](TODO.md) for the remaining analysis-engine work.
+See [`TODO.md`](TODO.md) for the completed analysis-engine roadmap and explicitly deferred scope.
 
 ## Build
 
@@ -87,6 +87,22 @@ The server negotiates MCP protocol `2025-11-25`. It publishes batched tools for 
 
 `rename` returns a checked edit plan. It does not write source files.
 
+### Local MCP usage data
+
+The MCP server records every input line, emitted response line, and derived event metric in `~/Library/Application Support/hw_odin_codeAnalysis/usage.sqlite3`. Recording is always active for MCP traffic, but a database failure does not change or delay a tool response beyond the bounded SQLite write attempt. The recorder retries after one minute, emits a throttled stderr diagnostic, and writes a synthetic gap event after recovery.
+
+Request and response payloads remain local. Reports stop exposing a payload when its event is older than 90 days, and MCP startup or daily maintenance then removes the expired row. Session and event metrics remain in SQLite so reports can compare tool frequency, outcomes, latency, batch sizes, result counts, empty results, capability misses, ambiguous or unresolved resolutions, truncation, and byte volume over time. No data is uploaded.
+
+Read aggregate data without returning stored payloads:
+
+```sh
+hw-odin-analyze usage status
+hw-odin-analyze usage summary --days 30
+hw-odin-analyze --root /path/to/project usage recent --days 7 --tool audit_primitives --limit 50
+```
+
+`usage recent --include-payloads` returns valid UTF-8 as text and returns other bytes as base64. `HW_ODIN_ANALYZE_USAGE_DB` overrides the database path for tests and development runs. The recorder preserves an existing override directory's permissions and restricts the database, WAL, and shared-memory files to the current user.
+
 ### Configuration
 
 Place `code-analysis.json` in the analysis root. The file can set the Odin
@@ -128,14 +144,15 @@ expressions can return `Ambiguous` or `Unresolved`. Run `diagnostics` or
 ## Performance
 
 Run `./benchmark.sh` to measure the local fixture. On an Apple Silicon
-development machine, version `0.3.0` measured on 2026-08-12:
+development machine, version `0.4.0` measured on 2026-08-12 with MCP usage recording active:
 
-- Warm definition query: 2.4 ms mean across 100 runs.
-- Cold daemon startup and initial index: 16.0 ms mean across 10 runs.
-- Cold capability-catalog construction: 653.9 ms.
-- Warm indexed capability audit: 14.41 ms median across 30 runs.
-- Equivalent fresh `rg` scan of Odin `core`: 21.91 ms median across 30 runs.
-- Warm MCP speedup over the regular source scan: 1.52× median.
+- Warm definition query: 3.0 ms mean across 100 runs.
+- Cold daemon startup and initial index: 21.1 ms mean across 10 runs.
+- Cold capability-catalog construction: 660.0 ms.
+- Warm indexed and recorded capability audit: 14.63 ms median across 30 runs.
+- Equivalent fresh `rg` scan of Odin `core`: 21.50 ms median across 30 runs.
+- Warm MCP speedup over the regular source scan: 1.47× median.
+- Usage database after the initialized session and 30 recorded audits: 548,864 bytes across 31 events.
 
 The values include process startup, socket transport, JSON encoding, and
 FSEvents synchronization.

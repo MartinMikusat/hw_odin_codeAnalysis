@@ -5,6 +5,7 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
+import "core:strconv"
 import "core:strings"
 import "core:sys/posix"
 import "core:time"
@@ -12,17 +13,21 @@ import "core:time"
 import "code_analysis:analysis"
 import "code_analysis:service"
 import "code_analysis:transport"
+import "code_analysis:usage"
 import "code_analysis:watcher"
 
 IDLE_TIMEOUT_SECONDS :: 15 * 60
 REQUEST_READ_TIMEOUT :: 1 * time.Second
 
-usage :: proc() {
+print_usage :: proc() {
 	fmt.println(`hw-odin-analyze [--root PATH] [--compact] COMMAND
 
 Commands:
   capability-audit < INPUT.json
   mcp
+  usage status
+  usage summary [--days N]
+  usage recent [--days N] [--tool NAME] [--limit N] [--include-payloads]
   outline FILE
   search QUERY
   inspect FILE LINE COLUMN
@@ -52,6 +57,7 @@ fail :: proc(message: string) -> ! {
 
 parse_arguments :: proc() -> (
 	root: string,
+	root_explicit: bool,
 	compact: bool,
 	arguments: [dynamic]string,
 ) {
@@ -75,11 +81,123 @@ parse_arguments :: proc() -> (
 			if root_error != nil {
 				fail("failed to resolve the analysis root")
 			}
+			root_explicit = true
 		} else {
 			append(&arguments, argument)
 		}
 	}
 	return
+}
+
+write_json :: proc(value: any, compact: bool) {
+	options := json.Marshal_Options {
+		pretty = !compact,
+		use_spaces = true,
+		spaces = 2,
+		sort_maps_by_key = true,
+		use_enum_names = true,
+	}
+	data, marshal_error := json.marshal(
+		value,
+		options,
+		context.temp_allocator,
+	)
+	if marshal_error != nil {
+		fail("failed to encode JSON output")
+	}
+	fmt.println(string(data))
+}
+
+parse_positive_option :: proc(name, source: string, maximum: int) -> int {
+	value, parsed := strconv.parse_int(source)
+	if !parsed || value <= 0 || value > maximum {
+		fail(fmt.aprintf(
+			"%s must be between 1 and %d",
+			name,
+			maximum,
+			allocator = context.temp_allocator,
+		))
+	}
+	return value
+}
+
+run_usage_report :: proc(
+	root: string,
+	root_explicit, compact: bool,
+	arguments: []string,
+) {
+	if len(arguments) < 2 {
+		fail("usage requires status, summary, or recent")
+	}
+	command := arguments[1]
+	if command == "status" {
+		if len(arguments) != 2 {
+			fail("usage status accepts no report options")
+		}
+		report, ok := usage.status(context.temp_allocator)
+		if !ok {
+			fail("usage database does not exist or has an unsupported schema")
+		}
+		write_json(report, compact)
+		return
+	}
+	if command != "summary" && command != "recent" {
+		fail("usage requires status, summary, or recent")
+	}
+	days := 30
+	limit := 50
+	tool_filter := ""
+	include_payloads := false
+	for index := 2; index < len(arguments); index += 1 {
+		switch arguments[index] {
+		case "--days":
+			if index + 1 >= len(arguments) {
+				fail("--days requires a value")
+			}
+			index += 1
+			days = parse_positive_option("--days", arguments[index], 36500)
+		case "--tool":
+			if command != "recent" || index + 1 >= len(arguments) {
+				fail("--tool is valid only for usage recent and requires a value")
+			}
+			index += 1
+			tool_filter = arguments[index]
+		case "--limit":
+			if command != "recent" || index + 1 >= len(arguments) {
+				fail("--limit is valid only for usage recent and requires a value")
+			}
+			index += 1
+			limit = parse_positive_option("--limit", arguments[index], 1000)
+		case "--include-payloads":
+			if command != "recent" {
+				fail("--include-payloads is valid only for usage recent")
+			}
+			include_payloads = true
+		case:
+			fail(fmt.aprintf("unknown usage option: %s", arguments[index], allocator = context.temp_allocator))
+		}
+	}
+	root_filter := root if root_explicit else ""
+	if command == "summary" {
+		report, ok := usage.summary(days, root_filter, context.temp_allocator)
+		if !ok {
+			fail("failed to read the usage summary")
+		}
+		write_json(report, compact)
+		return
+	}
+	report, ok := usage.recent(
+		days,
+		root_filter,
+		tool_filter,
+		limit,
+		include_payloads,
+		context.temp_allocator,
+	)
+	if !ok {
+		fail("failed to read recent usage")
+	}
+	write_json(report, compact)
 }
 
 marshal_request :: proc(
@@ -210,9 +328,16 @@ run_capability_client :: proc(root: string, compact: bool) {
 
 MCP_PROTOCOL_VERSION :: "2025-11-25"
 
+MCP_Client_Info :: struct {
+	name: string,
+	version: string,
+}
+
 MCP_Request_Params :: struct {
-	name:      string,
-	arguments: json.Value,
+	name:             string,
+	arguments:        json.Value,
+	protocol_version: string          `json:"protocolVersion"`,
+	client_info:      MCP_Client_Info `json:"clientInfo"`,
 }
 
 MCP_Query :: struct {
@@ -316,12 +441,97 @@ MCP_Tool_List :: struct {
 	tools: []MCP_Tool,
 }
 
+MCP_Usage_Context :: struct {
+	store: ^usage.Store,
+	event: ^usage.Event,
+	started: time.Tick,
+	recorded: bool,
+}
+
+MCP_Query_Metrics :: struct {
+	empty_result_count: int,
+	ambiguous_count: int,
+	unresolved_count: int,
+	truncated: bool,
+}
+
+mcp_usage_context: ^MCP_Usage_Context
+
+mcp_metrics_add_resolution :: proc(
+	metrics: ^MCP_Query_Metrics,
+	value: json.Value,
+) {
+	#partial switch resolution in value {
+	case json.String:
+		if resolution == "Ambiguous" {
+			metrics.ambiguous_count += 1
+		} else if resolution == "Unresolved" {
+			metrics.unresolved_count += 1
+		}
+	}
+}
+
+mcp_query_metrics :: proc(command: string, value: json.Value) -> MCP_Query_Metrics {
+	metrics: MCP_Query_Metrics
+	#partial switch concrete in value {
+	case json.Null:
+		metrics.empty_result_count = 1
+	case json.Array:
+		if len(concrete) == 0 {
+			metrics.empty_result_count = 1
+		}
+	case json.Object:
+		if len(concrete) == 0 {
+			metrics.empty_result_count = 1
+		}
+		if truncated, found := concrete["truncated"]; found {
+			#partial switch is_truncated in truncated {
+			case json.Boolean:
+				metrics.truncated = is_truncated
+			}
+		}
+		resolution_target := value
+		if command == "definition_and_references" || command == "impact_analysis" {
+			if definition, found := concrete["definition"]; found {
+				resolution_target = definition
+			}
+		}
+		#partial switch result in resolution_target {
+		case json.Object:
+			if resolution, found := result["resolution"]; found {
+				mcp_metrics_add_resolution(&metrics, resolution)
+			}
+		}
+	}
+	return metrics
+}
+
+mcp_metrics_add :: proc(target: ^MCP_Query_Metrics, source: MCP_Query_Metrics) {
+	target.empty_result_count += source.empty_result_count
+	target.ambiguous_count += source.ambiguous_count
+	target.unresolved_count += source.unresolved_count
+	target.truncated = target.truncated || source.truncated
+}
+
+mcp_usage_finish :: proc() {
+	if mcp_usage_context == nil || mcp_usage_context.recorded {
+		return
+	}
+	mcp_usage_context.event.duration_ns = i64(time.tick_since(mcp_usage_context.started))
+	_ = usage.store_record(mcp_usage_context.store, mcp_usage_context.event^)
+	mcp_usage_context.recorded = true
+}
+
 mcp_write :: proc(value: any) {
 	data, marshal_error := json.marshal(value, allocator = context.temp_allocator)
 	if marshal_error != nil {
 		return
 	}
 	fmt.println(string(data))
+	if mcp_usage_context != nil && !mcp_usage_context.recorded {
+		mcp_usage_context.event.response_line = data
+		mcp_usage_finish()
+	}
 }
 
 mcp_parse_value :: proc(source: string) -> (json.Value, bool) {
@@ -472,6 +682,11 @@ mcp_run_batch :: proc(
 		mcp_write_call_result(id, "queries must contain between 1 and 64 entries", true)
 		return
 	}
+	if mcp_usage_context != nil {
+		mcp_usage_context.event.generation = state.generation
+		mcp_usage_context.event.batch_size = len(input.queries)
+	}
+	batch_metrics: MCP_Query_Metrics
 	results := make([]json.Value, len(input.queries), context.temp_allocator)
 	for query, index in input.queries {
 		value: json.Value
@@ -487,6 +702,7 @@ mcp_run_batch :: proc(
 			return
 		}
 		results[index] = value
+		mcp_metrics_add(&batch_metrics, mcp_query_metrics(command, value))
 	}
 	payload, marshal_error := json.marshal(
 		MCP_Batch_Result{
@@ -505,6 +721,13 @@ mcp_run_batch :: proc(
 		allocator = context.temp_allocator,
 	)
 	if marshal_error != nil { mcp_write_error(id, -32603, "failed to encode batch result"); return }
+	if mcp_usage_context != nil {
+		mcp_usage_context.event.result_count = len(results)
+		mcp_usage_context.event.empty_result_count = batch_metrics.empty_result_count
+		mcp_usage_context.event.ambiguous_count = batch_metrics.ambiguous_count
+		mcp_usage_context.event.unresolved_count = batch_metrics.unresolved_count
+		mcp_usage_context.event.truncated = batch_metrics.truncated
+	}
 	mcp_write_call_result(id, string(payload))
 }
 
@@ -518,6 +741,11 @@ mcp_write_result :: proc(id: json.Value, source: string) {
 }
 
 mcp_write_error :: proc(id: json.Value, code: int, message: string) {
+	if mcp_usage_context != nil {
+		mcp_usage_context.event.outcome = "protocol_error"
+		mcp_usage_context.event.error_code = code
+		mcp_usage_context.event.error_message = message
+	}
 	mcp_write(
 		MCP_Error_Response {
 			jsonrpc = "2.0",
@@ -532,6 +760,10 @@ mcp_write_call_result :: proc(
 	payload: string,
 	is_error := false,
 ) {
+	if is_error && mcp_usage_context != nil {
+		mcp_usage_context.event.outcome = "tool_error"
+		mcp_usage_context.event.error_message = payload
+	}
 	content := [1]MCP_Content{{type = "text", text = payload}}
 	result := MCP_Call_Result {
 		content = content[:],
@@ -559,6 +791,17 @@ run_mcp :: proc(root: string) {
 		fail(catalog_error)
 	}
 	defer analysis.capability_catalog_destroy(&catalog)
+	usage_store: usage.Store
+	_ = usage.store_init(
+		&usage_store,
+		root,
+		service.VERSION,
+		filepath.base(state.odin_root),
+		state.odin_root,
+		state.config_digest,
+	)
+	defer usage.store_destroy(&usage_store)
+	_ = usage.store_prune_payloads(&usage_store)
 	catalog_watcher: watcher.Watcher
 	base_root, _ := filepath.join({catalog.odin_root, "base"}, context.temp_allocator)
 	core_root, _ := filepath.join({catalog.odin_root, "core"}, context.temp_allocator)
@@ -580,6 +823,19 @@ run_mcp :: proc(root: string) {
 	defer bufio.scanner_destroy(&scanner)
 	for bufio.scanner_scan(&scanner) {
 		free_all(context.temp_allocator)
+		raw_line := bufio.scanner_text(&scanner)
+		event := usage.Event {
+			event_kind = "request",
+			outcome = "ok",
+			received_at_ns = usage.now_unix_ns(),
+			request_line = transmute([]byte)raw_line,
+		}
+		usage_context := MCP_Usage_Context {
+			store = &usage_store,
+			event = &event,
+			started = time.tick_now(),
+		}
+		mcp_usage_context = &usage_context
 		watcher.flush(&catalog_watcher)
 		if watcher.consume_dirty(&catalog_watcher) {
 			candidate: analysis.Capability_Catalog
@@ -593,14 +849,23 @@ run_mcp :: proc(root: string) {
 				catalog = candidate
 				analysis.capability_catalog_destroy(&previous)
 				analysis.context_publish_candidate(&state, &analysis_candidate)
+				_ = usage.store_update_context(
+					&usage_store,
+					filepath.base(state.odin_root),
+					state.odin_root,
+					state.config_digest,
+				)
 			} else {
 				if catalog_ok { analysis.capability_catalog_destroy(&candidate) }
 				if analysis_ok { analysis.context_destroy(&analysis_candidate) }
 				watcher.mark_dirty(&catalog_watcher)
 			}
 		}
-		line := strings.trim_space(bufio.scanner_text(&scanner))
+		line := strings.trim_space(raw_line)
 		if line == "" {
+			event.event_kind = "ignored_blank"
+			event.outcome = "ignored"
+			mcp_usage_finish()
 			continue
 		}
 		request: MCP_Request
@@ -609,8 +874,13 @@ run_mcp :: proc(root: string) {
 			&request,
 			allocator = context.temp_allocator,
 		); decode_error != nil {
+			event.event_kind = "parse_error"
 			mcp_write_error({}, -32700, "invalid JSON-RPC request")
 			continue
+		}
+		event.method = request.method
+		if request.method == "tools/call" {
+			event.tool_name = request.params.name
 		}
 		if request.jsonrpc != "2.0" {
 			mcp_write_error(request.id, -32600, "jsonrpc must be 2.0")
@@ -618,11 +888,24 @@ run_mcp :: proc(root: string) {
 		}
 		switch request.method {
 		case "initialize":
+			_ = usage.store_update_client(
+				&usage_store,
+				request.params.protocol_version,
+				request.params.client_info.name,
+				request.params.client_info.version,
+			)
 			mcp_write_result(
 				request.id,
-				`{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"hw-odin-analyze","version":"0.3.0"}}`,
+				fmt.aprintf(
+					`{"protocolVersion":"%s","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"hw-odin-analyze","version":"%s"}}`,
+					MCP_PROTOCOL_VERSION,
+					service.VERSION,
+					allocator = context.temp_allocator,
+				),
 			)
 		case "notifications/initialized":
+			event.outcome = "notification"
+			mcp_usage_finish()
 			continue
 		case "ping":
 			mcp_write_result(request.id, `{}`)
@@ -654,6 +937,15 @@ run_mcp :: proc(root: string) {
 				}
 				result, audit_error, audit_ok := analysis.capability_audit_catalog(&catalog, input, allocator = context.temp_allocator)
 				if !audit_ok { mcp_write_call_result(request.id, audit_error, true); continue }
+				event.generation = result.generation
+				event.batch_size = len(input.primitives)
+				event.result_count = len(result.results)
+				event.truncated = result.truncated
+				for primitive_result in result.results {
+					if primitive_result.status == "not_found" {
+						event.not_found_count += 1
+					}
+				}
 				payload, marshal_error := json.marshal(result, allocator = context.temp_allocator)
 				if marshal_error != nil { mcp_write_error(request.id, -32603, "failed to encode capability result"); continue }
 				mcp_write_call_result(request.id, string(payload))
@@ -672,7 +964,9 @@ run_mcp :: proc(root: string) {
 		case:
 			mcp_write_error(request.id, -32601, "method not found")
 		}
+		mcp_usage_finish()
 	}
+	mcp_usage_context = nil
 }
 
 ensure_daemon :: proc(root: string, paths: transport.Runtime_Paths) -> bool {
@@ -939,11 +1233,11 @@ run_client :: proc(
 }
 
 main :: proc() {
-	root, compact, arguments := parse_arguments()
+	root, root_explicit, compact, arguments := parse_arguments()
 	defer delete(root)
 
 	if len(arguments) == 0 || arguments[0] == "help" {
-		usage()
+		print_usage()
 		return
 	}
 	if arguments[0] == "version" {
@@ -966,6 +1260,10 @@ main :: proc() {
 			fail("mcp accepts no positional arguments")
 		}
 		run_mcp(root)
+		return
+	}
+	if arguments[0] == "usage" {
+		run_usage_report(root, root_explicit, compact, arguments[:])
 		return
 	}
 	run_client(root, compact, arguments[:])

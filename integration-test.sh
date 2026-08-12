@@ -14,6 +14,8 @@ timeout_analyzer=()
 partial_client_pid=""
 partial_fifo_open=false
 timeout_status_pid=""
+usage_root=""
+usage_database=""
 
 cleanup() {
   if [[ "$partial_fifo_open" == true ]]; then
@@ -48,6 +50,9 @@ cleanup() {
     "${timeout_analyzer[@]}" stop >/dev/null 2>&1 || true
     rm -rf -- "$timeout_root"
   fi
+  if [[ -n "$usage_root" ]]; then
+    rm -rf -- "$usage_root"
+  fi
 }
 trap cleanup EXIT
 
@@ -64,19 +69,24 @@ capability="$({
 [[ "$capability" == *'"source":"odin.core"'* ]]
 
 max_batch="$(jq -nc '{queries:[range(64)|{query:"greet"}]}')"
+usage_root="$(mktemp -d "${TMPDIR:-/tmp}/hw-odin-usage-XXXXXX")"
+usage_database="$usage_root/usage.sqlite3"
 mcp="$({
   printf '%s\n' \
-    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"integration-test","version":"1"}}}' \
     '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
     '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
     '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"audit_primitives","arguments":{"target_project":".","primitives":[]}}}' \
     '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lookup_symbols","arguments":{"queries":[{"query":"greet"}]}}}' \
     '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"missing_tool","arguments":{}}}' \
     '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"lookup_symbols","arguments":{"queries":[]}}}' \
-    '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"audit_primitives","arguments":{"target_project":".","primitives":[{"id":"bad","need":"bad constraint","search_terms":[],"generic_requirement":"sometimes"}]}}}'
+    '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"audit_primitives","arguments":{"target_project":".","primitives":[{"id":"bad","need":"bad constraint","search_terms":[],"generic_requirement":"sometimes"}]}}}' \
+    '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"inspect_symbol","arguments":{"queries":[{"file":"main.odin","line":1,"column":1}]}}}' \
+    '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"lookup_symbols","arguments":{"queries":[{"query":"greet"},{"query":""}]}}}'
   jq -nc --argjson arguments "$max_batch" \
     '{jsonrpc:"2.0",id:8,method:"tools/call",params:{name:"lookup_symbols",arguments:$arguments}}'
-} | ./build/hw-odin-analyze --root "$root" mcp)"
+} | HW_ODIN_ANALYZE_USAGE_DB="$usage_database" \
+      ./build/hw-odin-analyze --root "$root" mcp)"
 printf '%s\n' "$mcp" | jq -e -s '
   (map(select(.id == 1))[0].result.protocolVersion == "2025-11-25") and
   (map(select(.id == 2))[0].result.tools | map(.name) | index("audit_primitives") != null) and
@@ -86,8 +96,197 @@ printf '%s\n' "$mcp" | jq -e -s '
   (map(select(.id == 5))[0].error.code == -32602) and
   (map(select(.id == 6))[0].result.isError == true) and
   (map(select(.id == 7))[0].result.isError == true) and
-  (map(select(.id == 8))[0].result.structuredContent.results | length == 64)
+  (map(select(.id == 8))[0].result.structuredContent.results | length == 64) and
+  (map(select(.id == 9))[0].result.structuredContent.results[0].resolution == "Unresolved") and
+  (map(select(.id == 10))[0].result.isError == true)
 ' >/dev/null
+
+usage_status="$(
+  HW_ODIN_ANALYZE_USAGE_DB="$usage_database" \
+    ./build/hw-odin-analyze --compact usage status
+)"
+printf '%s\n' "$usage_status" | jq -e '
+  (.schema_version == 1) and
+  (.session_count == 1) and
+  (.event_count == 11) and
+  (.payload_count == 11) and
+  (.payload_retention_days == 90)
+' >/dev/null
+[[ "$(stat -f '%Lp' "$usage_database")" == "600" ]]
+[[ "$(
+  sqlite3 -separator '|' "$usage_database" \
+    'SELECT client_name, client_version, protocol_version FROM mcp_sessions'
+)" == 'integration-test|1|2025-11-25' ]]
+
+usage_summary="$(
+  HW_ODIN_ANALYZE_USAGE_DB="$usage_database" \
+    ./build/hw-odin-analyze --root "$root" --compact usage summary --days 1
+)"
+printf '%s\n' "$usage_summary" | jq -e '
+  (.total_events == 11) and
+  (.tool_calls == 8) and
+  (.protocol_error_count == 1) and
+  (.tool_error_count == 3) and
+  (.notification_count == 1) and
+  (.payloads_retained == 11) and
+  ([.groups[] | select(.tool_name == "lookup_symbols")][0].event_count == 4)
+' >/dev/null
+
+inspect_usage="$(
+  HW_ODIN_ANALYZE_USAGE_DB="$usage_database" \
+    ./build/hw-odin-analyze --root "$root" --compact usage recent \
+      --days 1 --tool inspect_symbol --limit 1
+)"
+printf '%s\n' "$inspect_usage" | jq -e '
+  (.events | length == 1) and
+  (.events[0].result_count == 1) and
+  (.events[0].unresolved_count == 1)
+' >/dev/null
+
+failed_batch_usage="$(
+  HW_ODIN_ANALYZE_USAGE_DB="$usage_database" \
+    ./build/hw-odin-analyze --root "$root" --compact usage recent \
+      --days 1 --tool lookup_symbols --limit 1
+)"
+printf '%s\n' "$failed_batch_usage" | jq -e '
+  (.events | length == 1) and
+  (.events[0].outcome == "tool_error") and
+  (.events[0].error_message == "query is required") and
+  (.events[0].result_count == 0) and
+  (.events[0].empty_result_count == 0) and
+  (.events[0].ambiguous_count == 0) and
+  (.events[0].unresolved_count == 0)
+' >/dev/null
+
+usage_recent="$(
+  HW_ODIN_ANALYZE_USAGE_DB="$usage_database" \
+    ./build/hw-odin-analyze --root "$root" --compact usage recent \
+      --days 1 --tool missing_tool --limit 1 --include-payloads
+)"
+printf '%s\n' "$usage_recent" | jq -e '
+  (.events | length == 1) and
+  (.events[0].outcome == "protocol_error") and
+  (.events[0].request_payload_encoding == "utf8") and
+  (.events[0].request_payload == "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"missing_tool\",\"arguments\":{}}}") and
+  (.events[0].response_payload == "{\"jsonrpc\":\"2.0\",\"id\":5,\"error\":{\"code\":-32602,\"message\":\"unknown tool name\"}}")
+' >/dev/null
+
+usage_writer_pids=()
+for writer in 1 2; do
+  {
+    printf '%s\n' \
+      "{\"jsonrpc\":\"2.0\",\"id\":$writer,\"method\":\"ping\"}" |
+      HW_ODIN_ANALYZE_USAGE_DB="$usage_database" \
+        ./build/hw-odin-analyze --root "$root" mcp \
+          >"$usage_root/writer-$writer.json"
+  } &
+  usage_writer_pids+=("$!")
+done
+for writer_pid in "${usage_writer_pids[@]}"; do
+  wait "$writer_pid"
+done
+for writer in 1 2; do
+  jq -e --argjson id "$writer" \
+    '(.id == $id) and (.result == {})' \
+    "$usage_root/writer-$writer.json" >/dev/null
+done
+usage_status="$(
+  HW_ODIN_ANALYZE_USAGE_DB="$usage_database" \
+    ./build/hw-odin-analyze --compact usage status
+)"
+printf '%s\n' "$usage_status" | jq -e '
+  (.session_count == 3) and (.event_count == 13) and (.payload_count == 13)
+' >/dev/null
+
+reload_root="$usage_root/reload-root"
+reload_database="$usage_root/reload.sqlite3"
+mkdir "$reload_root"
+printf 'package reload_fixture\n\nrun :: proc() {}\n' >"$reload_root/main.odin"
+printf '{"exclude_paths":[]}\n' >"$reload_root/code-analysis.json"
+python3 - "$reload_root" "$reload_database" <<'PY'
+import json
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+import time
+
+root = sys.argv[1]
+database = sys.argv[2]
+environment = os.environ.copy()
+environment["HW_ODIN_ANALYZE_USAGE_DB"] = database
+process = subprocess.Popen(
+    ["./build/hw-odin-analyze", "--root", root, "mcp"],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    env=environment,
+)
+
+def call(request):
+    process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+    process.stdin.flush()
+    response = process.stdout.readline()
+    if not response:
+        raise RuntimeError(process.stderr.read())
+    return json.loads(response)
+
+initialized = call({
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2025-11-25",
+        "clientInfo": {"name": "reload-test", "version": "1"},
+    },
+})
+assert initialized["id"] == 1
+Path(root, "code-analysis.json").write_text(
+    '{"exclude_paths":["ignored"]}\n',
+    encoding="utf-8",
+)
+
+for request_id in range(2, 102):
+    time.sleep(0.05)
+    response = call({"jsonrpc": "2.0", "id": request_id, "method": "ping"})
+    assert response == {"jsonrpc": "2.0", "id": request_id, "result": {}}
+    with sqlite3.connect(database) as connection:
+        session_count = connection.execute(
+            "SELECT COUNT(*) FROM mcp_sessions"
+        ).fetchone()[0]
+    if session_count == 2:
+        break
+else:
+    raise AssertionError("configuration reload did not rotate the usage session")
+
+process.stdin.close()
+assert process.wait(timeout=10) == 0, process.stderr.read()
+PY
+
+[[ "$(
+  sqlite3 -separator '|' "$reload_database" \
+    "SELECT COUNT(*), COUNT(DISTINCT config_digest),
+            SUM(ended_at_ns IS NOT NULL),
+            COUNT(*) FILTER (
+              WHERE protocol_version='2025-11-25'
+                AND client_name='reload-test'
+                AND client_version='1'
+            )
+     FROM mcp_sessions"
+)" == '2|2|2|2' ]]
+
+mkdir "$usage_root/unwritable-database"
+logging_failure_response="$(
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"ping"}' |
+    HW_ODIN_ANALYZE_USAGE_DB="$usage_root/unwritable-database" \
+      ./build/hw-odin-analyze --root "$root" mcp 2>"$usage_root/logging-error.txt"
+)"
+printf '%s\n' "$logging_failure_response" | jq -e '
+  (.id == 1) and (.result == {})
+' >/dev/null
+grep -Fq 'usage recording failed' "$usage_root/logging-error.txt"
 
 definition="$("${analyzer[@]}" definition main.odin 15 6)"
 [[ "$definition" == *'"resolution":"Exact"'* ]]

@@ -9,6 +9,9 @@ fi
 root="tests/fixtures/workspace"
 analyzer=(./build/hw-odin-analyze --root "$root" --compact)
 benchmark_command="./build/hw-odin-analyze --root $root --compact"
+usage_root="$(mktemp -d "${TMPDIR:-/tmp}/hw-odin-benchmark-usage-XXXXXX")"
+export HW_ODIN_ANALYZE_USAGE_DB="$usage_root/usage.sqlite3"
+trap 'rm -rf -- "$usage_root"' EXIT
 
 "${analyzer[@]}" stop >/dev/null 2>&1 || true
 "${analyzer[@]}" status >/dev/null
@@ -24,6 +27,8 @@ hyperfine --runs 10 \
 
 python3 - <<'PY'
 import json
+import os
+import sqlite3
 import statistics
 import subprocess
 import time
@@ -91,6 +96,10 @@ report = {
     "mcp_warm_median_ms": statistics.median(warm),
     "rg_core_median_ms": statistics.median(regular),
     "median_speedup": statistics.median(regular) / statistics.median(warm),
+    "usage_database_bytes": os.path.getsize(os.environ["HW_ODIN_ANALYZE_USAGE_DB"]),
+    "usage_event_count": sqlite3.connect(
+        os.environ["HW_ODIN_ANALYZE_USAGE_DB"]
+    ).execute("SELECT COUNT(*) FROM mcp_events").fetchone()[0],
 }
 print(json.dumps(report, indent=2))
 assert report["median_speedup"] > 1
