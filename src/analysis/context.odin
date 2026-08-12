@@ -2,6 +2,7 @@ package analysis
 
 import "core:mem/virtual"
 import "core:odin/ast"
+import "core:os"
 import "core:strings"
 
 File_Record :: struct {
@@ -18,6 +19,7 @@ File_Record :: struct {
 
 Analysis_Context :: struct {
 	root:        string,
+	odin_root:   string,
 	config:      Config,
 	config_digest: string,
 	arena:       virtual.Arena,
@@ -25,6 +27,7 @@ Analysis_Context :: struct {
 	symbols:     [dynamic]Symbol,
 	occurrences: [dynamic]Occurrence,
 	imports:     [dynamic]Import,
+	documents:   [dynamic]Document_Record,
 	watch_roots: [dynamic]string,
 	builtin_path: string,
 	generation:  u64,
@@ -42,9 +45,29 @@ context_allocate_index :: proc(state: ^Analysis_Context) -> bool {
 	state.symbols = make([dynamic]Symbol)
 	state.occurrences = make([dynamic]Occurrence)
 	state.imports = make([dynamic]Import)
+	state.documents = make([dynamic]Document_Record)
 	state.watch_roots = make([dynamic]string)
 	state.initialized = true
 	return true
+}
+
+resolve_odin_root :: proc(allocator := context.allocator) -> (string, bool) {
+	process_state, stdout, _, process_error := os.process_exec(
+		os.Process_Desc{command = []string{"hw-odin", "toolchain", "root"}},
+		context.temp_allocator,
+	)
+	if process_error != nil || process_state.exit_code != 0 {
+		return "", false
+	}
+	root := strings.trim_space(string(stdout))
+	if root == "" {
+		return "", false
+	}
+	resolved, path_error := os.get_absolute_path(root, allocator)
+	if path_error != nil {
+		return "", false
+	}
+	return resolved, true
 }
 
 context_build_index :: proc(state: ^Analysis_Context) -> bool {
@@ -59,6 +82,12 @@ context_init :: proc(state: ^Analysis_Context, root: string) -> bool {
 		return false
 	}
 	state.root = strings.clone(root)
+	odin_root_ok: bool
+	state.odin_root, odin_root_ok = resolve_odin_root()
+	if !odin_root_ok {
+		context_destroy(state)
+		return false
+	}
 	config_ok: bool
 	state.config, state.config_digest, config_ok = load_config(root)
 	if !config_ok {
@@ -78,12 +107,14 @@ context_destroy :: proc(state: ^Analysis_Context) {
 		return
 	}
 	delete(state.root)
+	delete(state.odin_root)
 	config_destroy(&state.config)
 	delete(state.config_digest)
 	delete(state.files)
 	delete(state.symbols)
 	delete(state.occurrences)
 	delete(state.imports)
+	delete(state.documents)
 	for root in state.watch_roots {
 		delete(root)
 	}
@@ -104,6 +135,12 @@ context_build_candidate :: proc(
 		return false
 	}
 	candidate.root = strings.clone(state.root)
+	odin_root_ok: bool
+	candidate.odin_root, odin_root_ok = resolve_odin_root()
+	if !odin_root_ok {
+		context_destroy(candidate)
+		return false
+	}
 	config_ok: bool
 	candidate.config, candidate.config_digest, config_ok = load_config(state.root)
 	if !config_ok {

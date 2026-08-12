@@ -107,11 +107,11 @@ add_watch_root :: proc(state: ^Analysis_Context, path: string) {
 	append(&state.watch_roots, normalized)
 }
 
-dependency_watch_root :: proc(directory: string) -> string {
+dependency_watch_root :: proc(state: ^Analysis_Context, directory: string) -> string {
 	collection_names := [3]string{"base", "core", "vendor"}
 	for collection_name in collection_names {
 		root, _ := filepath.join(
-			{ODIN_ROOT, collection_name},
+			{state.odin_root, collection_name},
 			context.temp_allocator,
 		)
 		root = normalized_path(root, context.temp_allocator)
@@ -120,6 +120,33 @@ dependency_watch_root :: proc(directory: string) -> string {
 		}
 	}
 	return directory
+}
+
+is_document_path :: proc(name: string) -> bool {
+	lower := strings.to_lower(name, context.temp_allocator)
+	return strings.has_suffix(lower, ".md") ||
+	       strings.has_suffix(lower, ".txt") ||
+	       strings.has_suffix(lower, ".rst")
+}
+
+parse_document_into_context :: proc(
+	state: ^Analysis_Context,
+	path: string,
+) -> bool {
+	arena_allocator := virtual_arena_allocator(state)
+	text, read_error := os.read_entire_file(path, arena_allocator)
+	if read_error != nil {
+		return false
+	}
+	append(
+		&state.documents,
+		Document_Record {
+			path = published_path(state, path, arena_allocator),
+			package_directory = strings.clone(filepath.dir(path), arena_allocator),
+			text = string(text),
+		},
+	)
+	return true
 }
 
 should_exclude :: proc(state: ^Analysis_Context, path: string) -> bool {
@@ -140,6 +167,7 @@ scan_recursive_root :: proc(
 	state: ^Analysis_Context,
 	root: string,
 	visited_files: ^map[string]bool,
+	visited_documents: ^map[string]bool,
 ) -> bool {
 	add_watch_root(state, root)
 	walker := os.walker_create(root)
@@ -150,13 +178,26 @@ scan_recursive_root :: proc(
 			}
 			continue
 		}
-		if info.type != .Regular || !strings.has_suffix(info.name, ".odin") {
+		if info.type != .Regular {
 			continue
 		}
 		if should_exclude(state, info.fullpath) {
 			continue
 		}
 		path := normalized_path(info.fullpath, context.temp_allocator)
+		if is_document_path(info.name) {
+			if !visited_documents^[path] {
+				visited_documents^[path] = true
+				if !parse_document_into_context(state, path) {
+					os.walker_destroy(&walker)
+					return false
+				}
+			}
+			continue
+		}
+		if !strings.has_suffix(info.name, ".odin") {
+			continue
+		}
 		if visited_files^[path] {
 			continue
 		}
@@ -175,6 +216,9 @@ scan_package_directory :: proc(
 	directory: string,
 	visited_files: ^map[string]bool,
 ) -> bool {
+	if !os.exists(directory) {
+		return true
+	}
 	entries, read_error := os.read_all_directory_by_path(
 		directory,
 		context.temp_allocator,
@@ -216,10 +260,21 @@ scan_and_parse :: proc(state: ^Analysis_Context) -> bool {
 		}
 		append(&roots, path)
 	}
+	if state.config.index_odin_collections {
+		collection_names := [3]string{"base", "core", "vendor"}
+		for collection_name in collection_names {
+			path, _ := filepath.join(
+				{state.odin_root, collection_name},
+				context.temp_allocator,
+			)
+			append(&roots, path)
+		}
+	}
 
 	visited_files := make(map[string]bool, context.temp_allocator)
+	visited_documents := make(map[string]bool, context.temp_allocator)
 	builtin_path, _ := filepath.join(
-		{ODIN_ROOT, "base", "builtin", "builtin.odin"},
+		{state.odin_root, "base", "builtin", "builtin.odin"},
 		context.temp_allocator,
 	)
 	builtin_path = normalized_path(builtin_path, context.temp_allocator)
@@ -230,7 +285,7 @@ scan_and_parse :: proc(state: ^Analysis_Context) -> bool {
 	add_watch_root(state, filepath.dir(builtin_path))
 
 	for root in roots {
-		if !scan_recursive_root(state, root, &visited_files) {
+		if !scan_recursive_root(state, root, &visited_files, &visited_documents) {
 			return false
 		}
 	}
@@ -249,7 +304,7 @@ scan_and_parse :: proc(state: ^Analysis_Context) -> bool {
 			continue
 		}
 		visited_packages[directory] = true
-		add_watch_root(state, dependency_watch_root(directory))
+		add_watch_root(state, dependency_watch_root(state, directory))
 		if !scan_package_directory(state, directory, &visited_files) {
 			return false
 		}
@@ -483,6 +538,17 @@ node_source_text :: proc(file: ^File_Record, node: ^ast.Node, allocator := conte
 	return strings.clone(file.source[start:end], allocator)
 }
 
+comment_source_text :: proc(
+	file: ^File_Record,
+	group: ^ast.Comment_Group,
+	allocator := context.allocator,
+) -> string {
+	if group == nil {
+		return ""
+	}
+	return node_source_text(file, cast(^ast.Node)group, allocator)
+}
+
 add_value_symbols :: proc(collector: ^Collect_State, decl: ^ast.Value_Decl) {
 	is_global := collector.top_level[cast(^ast.Node)decl]
 	for name_expression, index in decl.names {
@@ -534,6 +600,11 @@ add_value_symbols :: proc(collector: ^Collect_State, decl: ^ast.Value_Decl) {
 				detail_node,
 				virtual_arena_allocator(collector.analysis),
 			),
+			documentation = comment_source_text(
+				collector.file,
+				decl.docs,
+				virtual_arena_allocator(collector.analysis),
+			),
 			is_global = is_global,
 		}
 		append(&collector.analysis.symbols, symbol)
@@ -566,6 +637,11 @@ add_field_symbols :: proc(collector: ^Collect_State, field: ^ast.Field) {
 				detail = node_source_text(
 					collector.file,
 					cast(^ast.Node)field.type,
+					virtual_arena_allocator(collector.analysis),
+				),
+				documentation = comment_source_text(
+					collector.file,
+					field.docs,
 					virtual_arena_allocator(collector.analysis),
 				),
 			},
@@ -680,7 +756,7 @@ resolve_import_path :: proc(
 		   collection_name == "core" ||
 		   collection_name == "vendor" {
 			result, _ := filepath.join(
-				{ODIN_ROOT, collection_name, suffix},
+				{state.odin_root, collection_name, suffix},
 				allocator,
 			)
 			return result

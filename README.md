@@ -8,28 +8,30 @@ Models used:
 
 - **GPT-5.6-Sol**
 
-The project analyzes saved Odin source files for terminal agents. It does not implement an editor language server or an MCP server.
+The project analyzes saved Odin source files for terminal agents and exposes capability auditing through both its CLI and an MCP stdio server. It does not implement an editor language server.
 
 ## Status
 
-The first implementation targets macOS on Apple Silicon and Odin `dev-2026-07a`.
+The implementation targets macOS on Apple Silicon and the active monthly compiler managed by `hw-odin`.
+
+See [`TODO.md`](TODO.md) for the remaining analysis-engine work.
 
 ## Build
 
 ```sh
-ODIN=/Users/martin/.local/share/odin/dev-2026-07a/odin ./build.sh
+./build.sh
 ```
 
 Install the verified binary in `~/.local/bin`:
 
 ```sh
-ODIN=/Users/martin/.local/share/odin/dev-2026-07a/odin ./install.sh
+./install.sh
 ```
 
 ## Test
 
 ```sh
-ODIN=/Users/martin/.local/share/odin/dev-2026-07a/odin ./test.sh
+./test.sh
 ```
 
 ## Commands
@@ -57,6 +59,31 @@ hw-odin-analyze --root /path/to/project diagnostics --workspace
 hw-odin-analyze --root /path/to/project status
 hw-odin-analyze --root /path/to/project stop
 ```
+
+Audit every implementation primitive in one request by sending a JSON object on stdin:
+
+```sh
+printf '%s\n' '{
+  "target_project": "hw_calendar",
+  "primitives": [
+    {
+      "id": "weekday",
+      "need": "calculate a weekday from a civil date",
+      "search_terms": ["datetime.day_of_week", "day_of_week"]
+    }
+  ]
+}' | hw-odin-analyze --root /Users/martin/projects/main capability-audit
+```
+
+The audit scans the active compiler's complete `base`, `core`, and `vendor` trees plus every non-excluded workspace source and documentation file. An exact case-normalized symbol or qualified-name match returns `available`; token overlap returns `candidate`; no indexed match returns `not_found`. A `not_found` result is search evidence, not a semantic proof that no implementation exists.
+
+Start the newline-delimited JSON-RPC MCP transport with:
+
+```sh
+hw-odin-analyze --root /Users/martin/projects/main mcp
+```
+
+The server negotiates MCP protocol `2025-11-25` and publishes one tool, `audit_primitives`. Tool results include both `structuredContent` and a JSON text fallback.
 
 `rename` returns a checked edit plan. It does not write source files.
 
@@ -89,14 +116,14 @@ Automatically followed dependencies are read-only. They support navigation, and
 completion exposes only symbols made visible by selectors or `using import`.
 Configured collection roots remain writable and contribute complete references.
 
-Built-in definitions point to `base/builtin/builtin.odin` in the pinned compiler
-distribution. Keep that compiler distribution available after installation.
+Built-in definitions point to `base/builtin/builtin.odin` in the active compiler
+distribution returned by `hw-odin toolchain root`.
 
 Type inference currently uses declared source types. It does not execute the
 complete Odin checker. General `using` statements, conditional-file evaluation,
 polymorphic specialization, implicit selectors, overloads, and inferred
 expressions can return `Ambiguous` or `Unresolved`. Run `diagnostics` or
-`odin check` for compiler authority.
+`hw-odin check` for compiler authority.
 
 ## Performance
 

@@ -1,5 +1,6 @@
 package main
 
+import "core:bufio"
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
@@ -20,6 +21,8 @@ usage :: proc() {
 	fmt.println(`hw-odin-analyze [--root PATH] [--compact] COMMAND
 
 Commands:
+  capability-audit < INPUT.json
+  mcp
   outline FILE
   search QUERY
   inspect FILE LINE COLUMN
@@ -145,7 +148,7 @@ start_daemon :: proc(root: string, paths: transport.Runtime_Paths) -> bool {
 		return false
 	}
 
-	for attempt := 0; attempt < 200; attempt += 1 {
+	for attempt := 0; attempt < 2000; attempt += 1 {
 		socket, connected := transport.connect(paths.socket_path)
 		if connected {
 			posix.close(socket)
@@ -154,6 +157,230 @@ start_daemon :: proc(root: string, paths: transport.Runtime_Paths) -> bool {
 		time.sleep(10 * time.Millisecond)
 	}
 	return false
+}
+
+run_capability_client :: proc(root: string, compact: bool) {
+	input := make([dynamic]byte, context.temp_allocator)
+	buffer: [4096]byte
+	for {
+		count, read_error := os.read(os.stdin, buffer[:])
+		if count > 0 {
+			append(&input, ..buffer[:count])
+		}
+		if read_error != nil || count == 0 {
+			break
+		}
+	}
+	if len(input) > 1024 * 1024 {
+		fail("capability-audit input exceeds 1 MiB")
+	}
+	audit_input: analysis.Capability_Audit_Input
+	if decode_error := json.unmarshal(
+		input[:],
+		&audit_input,
+		allocator = context.temp_allocator,
+	); decode_error != nil {
+		fail("capability-audit input is invalid JSON")
+	}
+	result, audit_error, audit_ok := analysis.capability_audit_workspace(
+		root,
+		audit_input,
+		context.temp_allocator,
+	)
+	if !audit_ok {
+		fail(audit_error)
+	}
+	options := json.Marshal_Options {
+		pretty = !compact,
+		use_spaces = true,
+		spaces = 2,
+		sort_maps_by_key = true,
+		use_enum_names = true,
+	}
+	payload, marshal_error := json.marshal(
+		result,
+		options,
+		context.temp_allocator,
+	)
+	if marshal_error != nil {
+		fail("failed to encode capability-audit result")
+	}
+	fmt.println(string(payload))
+}
+
+MCP_PROTOCOL_VERSION :: "2025-11-25"
+
+MCP_Request_Params :: struct {
+	name:      string,
+	arguments: analysis.Capability_Audit_Input,
+}
+
+MCP_Request :: struct {
+	jsonrpc: string,
+	id:      json.Value,
+	method:  string,
+	params:  MCP_Request_Params,
+}
+
+MCP_Response :: struct {
+	jsonrpc: string,
+	id:      json.Value,
+	result:  json.Value,
+}
+
+MCP_Error_Value :: struct {
+	code:    int,
+	message: string,
+}
+
+MCP_Error_Response :: struct {
+	jsonrpc: string,
+	id:      json.Value,
+	error:   MCP_Error_Value,
+}
+
+MCP_Content :: struct {
+	type: string,
+	text: string,
+}
+
+MCP_Call_Result :: struct {
+	content:            []MCP_Content,
+	structured_content: json.Value `json:"structuredContent,omitempty"`,
+	is_error:           bool       `json:"isError,omitempty"`,
+}
+
+MCP_Call_Response :: struct {
+	jsonrpc: string,
+	id:      json.Value,
+	result:  MCP_Call_Result,
+}
+
+mcp_write :: proc(value: any) {
+	data, marshal_error := json.marshal(value, allocator = context.temp_allocator)
+	if marshal_error != nil {
+		return
+	}
+	fmt.println(string(data))
+}
+
+mcp_parse_value :: proc(source: string) -> (json.Value, bool) {
+	value: json.Value
+	if parse_error := json.unmarshal(
+		transmute([]byte)source,
+		&value,
+		allocator = context.temp_allocator,
+	); parse_error != nil {
+		return {}, false
+	}
+	return value, true
+}
+
+mcp_write_result :: proc(id: json.Value, source: string) {
+	result, parsed := mcp_parse_value(source)
+	if !parsed {
+		mcp_write_error(id, -32603, "failed to encode MCP result")
+		return
+	}
+	mcp_write(MCP_Response{jsonrpc = "2.0", id = id, result = result})
+}
+
+mcp_write_error :: proc(id: json.Value, code: int, message: string) {
+	mcp_write(
+		MCP_Error_Response {
+			jsonrpc = "2.0",
+			id = id,
+			error = {code = code, message = message},
+		},
+	)
+}
+
+mcp_write_call_result :: proc(
+	id: json.Value,
+	payload: string,
+	is_error := false,
+) {
+	content := [1]MCP_Content{{type = "text", text = payload}}
+	result := MCP_Call_Result {
+		content = content[:],
+		is_error = is_error,
+	}
+	if !is_error {
+		structured, parsed := mcp_parse_value(payload)
+		if !parsed {
+			mcp_write_error(id, -32603, "failed to decode capability result")
+			return
+		}
+		result.structured_content = structured
+	}
+	mcp_write(MCP_Call_Response{jsonrpc = "2.0", id = id, result = result})
+}
+
+run_mcp :: proc(root: string) {
+	scanner: bufio.Scanner
+	bufio.scanner_init(&scanner, os.to_stream(os.stdin))
+	defer bufio.scanner_destroy(&scanner)
+	for bufio.scanner_scan(&scanner) {
+		free_all(context.temp_allocator)
+		line := strings.trim_space(bufio.scanner_text(&scanner))
+		if line == "" {
+			continue
+		}
+		request: MCP_Request
+		if decode_error := json.unmarshal(
+			transmute([]byte)line,
+			&request,
+			allocator = context.temp_allocator,
+		); decode_error != nil {
+			mcp_write_error({}, -32700, "invalid JSON-RPC request")
+			continue
+		}
+		if request.jsonrpc != "2.0" {
+			mcp_write_error(request.id, -32600, "jsonrpc must be 2.0")
+			continue
+		}
+		switch request.method {
+		case "initialize":
+			mcp_write_result(
+				request.id,
+				`{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"hw-odin-analyze","version":"0.2.0"}}`,
+			)
+		case "notifications/initialized":
+			continue
+		case "ping":
+			mcp_write_result(request.id, `{}`)
+		case "tools/list":
+			mcp_write_result(
+				request.id,
+				`{"tools":[{"name":"audit_primitives","title":"Audit Odin primitives","description":"Checks up to 64 planned implementation primitives against the active Odin base/core/vendor libraries and every non-excluded Odin workspace project in one deterministic query. Exact normalized symbols are available; ranked overlaps are candidates; not_found is limited to the indexed search.","inputSchema":{"type":"object","additionalProperties":false,"required":["target_project","primitives"],"properties":{"target_project":{"type":"string","minLength":1,"description":"Workspace-relative project directory."},"primitives":{"type":"array","maxItems":64,"items":{"type":"object","additionalProperties":false,"required":["id","need","search_terms"],"properties":{"id":{"type":"string","minLength":1},"need":{"type":"string","minLength":1},"search_terms":{"type":"array","items":{"type":"string","minLength":1}}}}}}}}]}`,
+			)
+		case "tools/call":
+			if request.params.name != "audit_primitives" {
+				mcp_write_error(request.id, -32602, "unknown tool name")
+				continue
+			}
+			result, audit_error, audit_ok := analysis.capability_audit_workspace(
+				root,
+				request.params.arguments,
+				allocator = context.temp_allocator,
+			)
+			if !audit_ok {
+				mcp_write_call_result(request.id, audit_error, true)
+				continue
+			}
+			payload, marshal_error := json.marshal(
+				result,
+				allocator = context.temp_allocator,
+			)
+			if marshal_error != nil {
+				mcp_write_error(request.id, -32603, "failed to encode capability result")
+				continue
+			}
+			mcp_write_call_result(request.id, string(payload))
+		case:
+			mcp_write_error(request.id, -32601, "method not found")
+		}
+	}
 }
 
 ensure_daemon :: proc(root: string, paths: transport.Runtime_Paths) -> bool {
@@ -433,6 +660,20 @@ main :: proc() {
 	}
 	if arguments[0] == "__daemon" {
 		run_daemon(root)
+		return
+	}
+	if arguments[0] == "capability-audit" {
+		if len(arguments) != 1 {
+			fail("capability-audit accepts JSON through stdin and no positional arguments")
+		}
+		run_capability_client(root, compact)
+		return
+	}
+	if arguments[0] == "mcp" {
+		if len(arguments) != 1 {
+			fail("mcp accepts no positional arguments")
+		}
+		run_mcp(root)
 		return
 	}
 	run_client(root, compact, arguments[:])

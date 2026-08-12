@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-odin_command="${ODIN:-odin}"
+odin_command="hw-odin"
 mkdir -p build
 "$odin_command" build cmd/hw-odin-analyze \
   -collection:code_analysis=src \

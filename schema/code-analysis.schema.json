@@ -36,6 +36,9 @@
             "items": {
                 "type": "string"
             }
+        },
+        "index_odin_collections": {
+            "type": "boolean"
         }
     },
     "additionalProperties": false

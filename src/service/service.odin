@@ -8,7 +8,7 @@ import "core:sys/posix"
 
 import "code_analysis:analysis"
 
-VERSION :: "0.1.0"
+VERSION :: "0.2.0"
 
 Request :: struct {
 	version:   int,
@@ -65,6 +65,27 @@ execute :: proc(
 	ok := false
 
 	switch command {
+	case "capability-audit":
+		if len(arguments) != 1 {
+			return Response{error = "capability-audit requires one JSON input object"}
+		}
+		input: analysis.Capability_Audit_Input
+		if decode_error := json.unmarshal(
+			transmute([]byte)arguments[0],
+			&input,
+			allocator = context.temp_allocator,
+		); decode_error != nil {
+			return Response{error = "capability-audit input is invalid JSON"}
+		}
+		result, audit_error, audit_ok := analysis.capability_audit_workspace(
+			state.root,
+			input,
+			context.temp_allocator,
+		)
+		if !audit_ok {
+			return Response{error = audit_error}
+		}
+		payload, ok = encode(result, request.compact, allocator)
 	case "status":
 		current_status := analysis.status(state, persistent)
 		if persistent {

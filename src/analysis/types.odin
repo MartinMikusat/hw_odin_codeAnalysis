@@ -46,7 +46,51 @@ Symbol :: struct {
 	range:     Source_Range,
 	extent:    Source_Range,
 	detail:    string,
+	documentation: string,
 	is_global: bool,
+}
+
+Document_Record :: struct {
+	path:              string,
+	package_directory: string,
+	text:              string,
+}
+
+Capability_Primitive :: struct {
+	id:           string,
+	need:         string,
+	search_terms: []string,
+}
+
+Capability_Audit_Input :: struct {
+	target_project: string,
+	primitives:     []Capability_Primitive,
+}
+
+Capability_Match :: struct {
+	name:      string,
+	kind:      string,
+	signature: string,
+	docs:      string,
+	package_name: string `json:"package"`,
+	file:      string,
+	line:      int,
+	source:    string,
+	rank:      int,
+	reasons:   []string,
+}
+
+Capability_Primitive_Result :: struct {
+	id:      string,
+	need:    string,
+	status:  string,
+	matches: []Capability_Match,
+}
+
+Capability_Audit_Result :: struct {
+	target_project: string,
+	compiler_root:  string,
+	results:        []Capability_Primitive_Result,
 }
 
 Occurrence :: struct {

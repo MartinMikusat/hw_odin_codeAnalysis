@@ -56,6 +56,24 @@ cleanup
 status="$("${analyzer[@]}" status)"
 [[ "$status" == *'"persistent":true'* ]]
 
+capability="$({
+  printf '%s\n' \
+    '{"target_project":".","primitives":[{"id":"weekday","need":"calculate a weekday","search_terms":["datetime.day_of_week","day_of_week"]}]}'
+} | "${analyzer[@]}" capability-audit)"
+[[ "$capability" == *'"status":"available"'* ]]
+[[ "$capability" == *'"source":"odin.core"'* ]]
+
+mcp="$({
+  printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+    '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"audit_primitives","arguments":{"target_project":".","primitives":[]}}}'
+} | ./build/hw-odin-analyze --root "$root" mcp)"
+[[ "$mcp" == *'"protocolVersion":"2025-11-25"'* ]]
+[[ "$mcp" == *'"name":"audit_primitives"'* ]]
+[[ "$mcp" == *'"structuredContent"'* ]]
+
 definition="$("${analyzer[@]}" definition main.odin 15 6)"
 [[ "$definition" == *'"resolution":"Exact"'* ]]
 [[ "$definition" == *'"name":"greet"'* ]]

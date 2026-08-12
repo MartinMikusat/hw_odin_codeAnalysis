@@ -14,11 +14,10 @@ OLS is read-only design reference material. It is not bundled with this project 
 
 The project imports tokenizer, parser, and AST packages distributed with the Odin compiler.
 
-- Version: `dev-2026-07a`
-- Source: <https://github.com/odin-lang/Odin/releases/tag/dev-2026-07a>
-- Archive checksum: `40e9f5970bdce1938769a792ebda7ac39d3d10bfe703a721ac5b578bc8dd3458`
+- Version and checksum: the active official monthly release recorded by `hw-odin toolchain status --json`
+- Source: <https://github.com/odin-lang/Odin/releases>
 - License: BSD 3-Clause
 - License location: the `LICENSE` file in the installed Odin distribution
 
 The compiler distribution is not bundled with this project. The installed
-analyzer reads its pinned `base/builtin/builtin.odin` source at runtime.
+analyzer resolves and reads its active `base/builtin/builtin.odin` source through `hw-odin toolchain root` at runtime.

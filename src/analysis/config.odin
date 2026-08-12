@@ -17,10 +17,11 @@ Config :: struct {
 	checker_args:  []string,
 	collections:   []Collection_Config,
 	exclude_paths: []string,
+	index_odin_collections: bool,
 }
 
 default_config :: proc(allocator := context.allocator) -> Config {
-	config := Config{odin_command = strings.clone("odin", allocator)}
+	config := Config{odin_command = strings.clone("hw-odin", allocator)}
 	config.exclude_paths = make([]string, 3, allocator)
 	config.exclude_paths[0] = strings.clone(".git", allocator)
 	config.exclude_paths[1] = strings.clone("build", allocator)
@@ -60,6 +61,7 @@ config_digest :: proc(
 	for value in config.exclude_paths {
 		digest = config_hash_string(digest, value)
 	}
+	digest = config_hash_u64(digest, config.index_odin_collections ? 1 : 0)
 	return fmt.aprintf("%016x", digest, allocator = allocator)
 }
 
@@ -109,6 +111,7 @@ load_config :: proc(
 		config.collections = parsed.collections
 		parsed.collections = nil
 	}
+	config.index_odin_collections = parsed.index_odin_collections
 	digest := config_digest(&config, allocator)
 	return config, digest, true
 }

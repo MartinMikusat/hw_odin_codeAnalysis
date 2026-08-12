@@ -129,6 +129,43 @@ fixture_context_at :: proc(path: string) -> (
 }
 
 @(test)
+capability_audit_finds_active_standard_library_symbols :: proc(t: ^testing.T) {
+	root, root_error := os.get_absolute_path(
+		"tests/fixtures/workspace",
+		context.temp_allocator,
+	)
+	testing.expect_value(t, root_error, nil)
+	if root_error != nil {
+		return
+	}
+	input := analysis.Capability_Audit_Input {
+		target_project = ".",
+		primitives = []analysis.Capability_Primitive{
+			{
+				id = "weekday",
+				need = "calculate a weekday",
+				search_terms = []string{"datetime.day_of_week", "day_of_week"},
+			},
+		},
+	}
+	result, _, audit_ok := analysis.capability_audit_workspace(
+		root,
+		input,
+		context.temp_allocator,
+	)
+	testing.expect(t, audit_ok)
+	if !audit_ok || len(result.results) != 1 {
+		return
+	}
+	testing.expect_value(t, result.results[0].status, "available")
+	testing.expect(t, len(result.results[0].matches) > 0)
+	if len(result.results[0].matches) > 0 {
+		testing.expect_value(t, result.results[0].matches[0].name, "day_of_week")
+		testing.expect_value(t, result.results[0].matches[0].source, "odin.core")
+	}
+}
+
+@(test)
 timed_transport_receive_releases_the_next_request :: proc(t: ^testing.T) {
 	stalled: [2]posix.FD
 	socket_error := posix.socketpair(.UNIX, .STREAM, .IP, &stalled)
@@ -207,7 +244,7 @@ configuration_digest_tracks_effective_values :: proc(t: ^testing.T) {
 			config_path,
 			`{
 			    "exclude_paths": [".git", "build", ".cache"],
-			    "odin_command": "odin"
+			    "odin_command": "hw-odin"
 			}`,
 		),
 		nil,
