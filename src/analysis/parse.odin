@@ -150,6 +150,19 @@ parse_document_into_context :: proc(
 }
 
 should_exclude :: proc(state: ^Analysis_Context, path: string) -> bool {
+	workspace_exclusions := [4]string{
+		"node_modules",
+		"dist",
+		".svelte-kit",
+		"research/reference-projects",
+	}
+	for excluded in workspace_exclusions {
+		needle := strings.join({"/", excluded, "/"}, "", context.temp_allocator)
+		if strings.contains(path, needle) ||
+		   strings.has_suffix(path, strings.join({"/", excluded}, "", context.temp_allocator)) {
+			return true
+		}
+	}
 	for excluded in state.config.exclude_paths {
 		if excluded == "" {
 			continue

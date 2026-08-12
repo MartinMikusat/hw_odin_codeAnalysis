@@ -317,11 +317,42 @@ mcp_write_call_result :: proc(
 }
 
 run_mcp :: proc(root: string) {
+	catalog: analysis.Capability_Catalog
+	if catalog_error, catalog_ok := analysis.capability_catalog_init(&catalog, root); !catalog_ok {
+		fail(catalog_error)
+	}
+	defer analysis.capability_catalog_destroy(&catalog)
+	catalog_watcher: watcher.Watcher
+	base_root, _ := filepath.join({catalog.odin_root, "base"}, context.temp_allocator)
+	core_root, _ := filepath.join({catalog.odin_root, "core"}, context.temp_allocator)
+	vendor_root, _ := filepath.join({catalog.odin_root, "vendor"}, context.temp_allocator)
+	catalog_watch_roots := [4]string{
+		catalog.workspace_root,
+		base_root,
+		core_root,
+		vendor_root,
+	}
+	if !watcher.start(&catalog_watcher, catalog_watch_roots[:]) {
+		fail("failed to start the capability catalog watcher")
+	}
+	defer watcher.stop(&catalog_watcher)
 	scanner: bufio.Scanner
 	bufio.scanner_init(&scanner, os.to_stream(os.stdin))
 	defer bufio.scanner_destroy(&scanner)
 	for bufio.scanner_scan(&scanner) {
 		free_all(context.temp_allocator)
+		watcher.flush(&catalog_watcher)
+		if watcher.consume_dirty(&catalog_watcher) {
+			candidate: analysis.Capability_Catalog
+			if _, candidate_ok := analysis.capability_catalog_init(&candidate, root); candidate_ok {
+				candidate.generation = catalog.generation + 1
+				previous := catalog
+				catalog = candidate
+				analysis.capability_catalog_destroy(&previous)
+			} else {
+				watcher.mark_dirty(&catalog_watcher)
+			}
+		}
 		line := strings.trim_space(bufio.scanner_text(&scanner))
 		if line == "" {
 			continue
@@ -359,8 +390,8 @@ run_mcp :: proc(root: string) {
 				mcp_write_error(request.id, -32602, "unknown tool name")
 				continue
 			}
-			result, audit_error, audit_ok := analysis.capability_audit_workspace(
-				root,
+			result, audit_error, audit_ok := analysis.capability_audit_catalog(
+				&catalog,
 				request.params.arguments,
 				allocator = context.temp_allocator,
 			)
