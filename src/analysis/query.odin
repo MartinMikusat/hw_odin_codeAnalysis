@@ -30,8 +30,9 @@ outline :: proc(
 	allocator := context.allocator,
 ) -> []Symbol {
 	result := make([dynamic]Symbol, allocator)
-	for symbol in state.symbols {
-		if symbol.path == path && symbol.is_global {
+	for symbol_id in state.symbols_by_path[path] {
+		symbol := state.symbols[int(symbol_id)]
+		if symbol.is_global {
 			append(&result, symbol)
 		}
 	}
@@ -46,12 +47,20 @@ search :: proc(
 ) -> []Symbol {
 	result := make([dynamic]Symbol, allocator)
 	query_lower := strings.to_lower(query, context.temp_allocator)
-	for symbol in state.symbols {
-		if !symbol.is_global {
+	for _, symbol_ids in state.symbols_by_name {
+		if len(symbol_ids) == 0 {
 			continue
 		}
+		symbol := state.symbols[int(symbol_ids[0])]
 		name_lower := strings.to_lower(symbol.name, context.temp_allocator)
-		if strings.contains(name_lower, query_lower) {
+		if !strings.contains(name_lower, query_lower) {
+			continue
+		}
+		for symbol_id in symbol_ids {
+			symbol = state.symbols[int(symbol_id)]
+			if !symbol.is_global {
+				continue
+			}
 			append(&result, symbol)
 		}
 	}
@@ -189,11 +198,7 @@ inspect :: proc(
 	reference_count := 0
 	if location.resolution == .Exact && len(location.locations) == 1 {
 		id := location.locations[0].id
-		for occurrence in state.occurrences {
-			if occurrence.symbol == id {
-				reference_count += 1
-			}
-		}
+		reference_count = len(state.occurrences_by_symbol[id])
 	}
 	return Inspect_Result {
 		resolution = location.resolution,
@@ -214,10 +219,8 @@ references :: proc(
 		return nil
 	}
 	result := make([dynamic]Occurrence, allocator)
-	for occurrence in state.occurrences {
-		if occurrence.symbol == symbol.id {
-			append(&result, occurrence)
-		}
+	for occurrence_index in state.occurrences_by_symbol[symbol.id] {
+		append(&result, state.occurrences[occurrence_index])
 	}
 	slice.sort_by(
 		result[:],
@@ -311,7 +314,8 @@ callers :: proc(
 	}
 	seen := make(map[Symbol_ID]bool, context.temp_allocator)
 	result := make([dynamic]Symbol, allocator)
-	for occurrence in state.occurrences {
+	for occurrence_index in state.occurrences_by_symbol[target.id] {
+		occurrence := state.occurrences[occurrence_index]
 		if occurrence.symbol != target.id || !occurrence.is_call {
 			continue
 		}
@@ -360,10 +364,12 @@ imports_for_file :: proc(
 	allocator := context.allocator,
 ) -> []Import {
 	result := make([dynamic]Import, allocator)
-	for value in state.imports {
-		if path == "" || value.path == path {
-			append(&result, value)
-		}
+	if path == "" {
+		append(&result, ..state.imports[:])
+		return result[:]
+	}
+	for import_index in state.imports_by_path[path] {
+		append(&result, state.imports[import_index])
 	}
 	return result[:]
 }

@@ -1,7 +1,6 @@
 package analysis
 
 import "core:path/filepath"
-import "core:mem/virtual"
 
 Symbol_Name_Index :: map[string][dynamic]Symbol_ID
 
@@ -405,26 +404,11 @@ resolve_field_selector :: proc(
 }
 
 resolve_occurrences :: proc(state: ^Analysis_Context) -> bool {
-	index_arena: virtual.Arena
-	if virtual.arena_init_growing(&index_arena) != nil {
-		return false
-	}
-	defer virtual.arena_destroy(&index_arena)
-	index_allocator := virtual.arena_allocator(&index_arena)
-	name_index := make(Symbol_Name_Index, index_allocator)
-	for symbol in state.symbols {
-		candidates, found := name_index[symbol.name]
-		if !found {
-			candidates = make([dynamic]Symbol_ID, index_allocator)
-		}
-		append(&candidates, symbol.id)
-		name_index[symbol.name] = candidates
-	}
 	for &occurrence in state.occurrences {
 		occurrence.symbol = resolve_occurrence(
 			state,
 			occurrence,
-			name_index[occurrence.name][:],
+			state.symbols_by_name[occurrence.name][:],
 		)
 	}
 	return true
