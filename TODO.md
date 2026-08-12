@@ -1,14 +1,95 @@
 # Odin Code Analysis TODO
 
-## Active
+Work in the order below. Build the persistent indexes and test boundaries before expanding the MCP surface, then make reuse results directly actionable before adding broader navigation and refactoring queries.
 
-- [ ] Add persistent query indexes.
-  - Build owned indexes by package directory, file, symbol name, owner type, and symbol identifier inside each private candidate generation.
-  - Publish the indexes with the existing atomic generation swap.
-  - Completion: definition, reference, completion, caller, callee, and search queries use the indexes instead of scanning complete symbol and file collections, with unchanged query results on the existing fixtures.
+## P1 — Persistent analysis foundation
 
-- [ ] Complete semantic and daemon coverage.
-  - Add fixtures for nested shadowing, sibling procedures, and ambiguous fields.
-  - Add a daemon test for files deleted during rebuild.
-  - Decode integration-test JSON and assert typed fields instead of matching shell substrings.
-  - Completion: the new semantic fixtures return the expected resolution kind and locations, deletion publishes a complete replacement generation without stale results, and integration failures identify the mismatched JSON field.
+### 1. Unify capability auditing on persistent indexes
+
+- Build owned indexes by package directory, file, symbol name, owner type, symbol identifier, declaration kind, signature, documentation, and source ownership.
+- Index the active Odin `base`, `core`, and `vendor` collections plus every non-excluded workspace project required by capability auditing.
+- Build each index inside the private candidate generation and publish all indexes through the existing atomic generation swap.
+- Replace the per-request workspace and standard-library scan in `audit_primitives` with queries against the published generation.
+- Preserve the classifications `odin.base`, `odin.core`, `odin.vendor`, `target_project`, `workspace_project`, and `test_or_fixture`.
+
+Completion: capability audits and definition, reference, completion, caller, callee, and symbol-search queries use the published indexes instead of scanning complete source collections. Existing fixtures return unchanged results, file changes invalidate the correct generation, and a benchmark records cold-index construction and warm-query latency.
+
+### 2. Complete semantic, daemon, and transport coverage
+
+- Add fixtures for nested shadowing, sibling procedures, and ambiguous fields.
+- Add a daemon test for files deleted during rebuild.
+- Verify that a failed candidate build retains the previous complete generation.
+- Decode integration-test JSON and assert typed fields instead of matching shell substrings.
+- Add typed MCP tests for invalid requests, unknown tools, invalid primitive constraints, empty batches, maximum-size batches, and structured error results.
+
+Completion: semantic fixtures return the expected resolution kind and locations, deletion publishes a complete replacement generation without stale results, failed rebuilds preserve the prior generation, and integration failures identify the mismatched JSON field.
+
+## P2 — Agent query surface
+
+### 3. Return an executable reuse recipe
+
+For each `available` or `candidate` match, return:
+
+- the exact import string and qualified symbol;
+- declaration kind and complete procedure or type signature;
+- generic constraints and platform or conditional-file restrictions when known;
+- source ownership, source path, line, and a bounded declaration excerpt;
+- relevant documentation and the concrete reasons for the rank;
+- the index generation and compiler release used for the result.
+
+Completion: an agent can turn an `available` result into the correct import and call shape without a second search. Every reported path and excerpt resolves to the same indexed generation.
+
+### 4. Accept structural primitive constraints
+
+Extend each primitive with optional fields for declaration kind, parameter types, result types, generic requirements, target platform, allocation behavior, ownership or lifetime requirements, and allowed source classes.
+
+Apply exact constraints before lexical ranking. Keep lexical overlap for discovery, but reject a same-named declaration when its known structure conflicts with the requested primitive. Report unknown properties as unknown instead of treating them as compatible.
+
+Completion: focused cases distinguish procedures with the same name but incompatible signatures, exclude test-only matches when requested, filter platform-specific declarations correctly, and preserve the current unconstrained request format.
+
+### 5. Expose existing navigation operations through MCP
+
+Add a small batch-oriented MCP surface for:
+
+- `lookup_symbols`: exact and fuzzy symbol discovery;
+- `inspect_symbol`: declaration, type, signature, documentation, owner type, and members;
+- `definition_and_references`: definition resolution and complete indexed references;
+- `call_graph`: direct callers and callees;
+- `file_outline`: ordered declarations in one file;
+- `package_api`: exported declarations and import paths for one package;
+- `imports`: resolved imports and collection ownership;
+- `diagnostics`: compiler-authoritative diagnostics for a file, package, or valid workspace scope.
+
+Accept batches where several related queries can share one generation. Prefer stable symbol identifiers after the first lookup while retaining file, line, and UTF-8 byte column inputs for source-position queries.
+
+Completion: every existing read-only CLI query has an MCP equivalent with structured output, bounded result sizes, explicit resolution states, and parity tests against the CLI result.
+
+### 6. Explain ambiguous and unresolved results
+
+Return the active package, visible imports, applicable scope chain, shadowing declaration, competing declarations, rejected candidates, and the analyzer boundary that prevented exact resolution. Distinguish missing declarations from unsupported inference, overload resolution, polymorphic specialization, implicit selectors, conditional-file evaluation, and general `using` behavior.
+
+Completion: every `Ambiguous` or `Unresolved` result contains a structured reason and at least one concrete next action when further source inspection or an `hw-odin check` can resolve it.
+
+## P3 — Change planning
+
+### 7. Add read-only impact analysis and checked edit plans
+
+- Add `impact_analysis` for references, callers, affected packages, relevant tests, imports, and configuration files tied to a symbol.
+- Expose the existing non-mutating rename planner through MCP.
+- Return checked text edits with the source generation and reject the plan when the indexed files have changed.
+- Keep all source mutation in the calling agent; the MCP server must not apply edits.
+
+Completion: an agent can inspect the complete known impact of a symbol change and obtain a generation-bound rename plan without modifying source files.
+
+### 8. Report freshness and analysis boundaries on every response
+
+Include the index generation, configuration digest, active compiler release and root, FSEvents flush state, query scope, excluded paths, result limit, and truncation state in every MCP result.
+
+Completion: an agent can detect stale or differently scoped results before combining them, and a truncated or bounded negative search cannot be mistaken for proof of absence.
+
+## Deferred and excluded
+
+- Do not add source-writing MCP tools. Keep rename and future refactors as checked edit plans.
+- Do not implement a full editor language-server protocol unless a separate product requirement establishes that scope.
+- Defer embedding-based semantic search until persistent structural and lexical indexes have measured recall gaps.
+- Keep the MCP surface small and batch-oriented; do not add one wrapper tool for every internal procedure.
