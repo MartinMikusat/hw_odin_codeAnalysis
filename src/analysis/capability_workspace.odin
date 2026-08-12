@@ -23,6 +23,120 @@ Capability_Catalog_Entry :: struct {
 	file:          string,
 	absolute_path: string,
 	line:          int,
+	platform:      string,
+}
+
+capability_platform :: proc(path: string) -> string {
+	name := filepath.base(path)
+	platforms := [7]string{"darwin", "linux", "windows", "freebsd", "openbsd", "wasm", "js"}
+	for platform in platforms {
+		needle := strings.join({"_", platform, ".odin"}, "", context.temp_allocator)
+		if strings.has_suffix(name, needle) {
+			return platform
+		}
+	}
+	return "all"
+}
+
+capability_import_path :: proc(package_value, source: string, allocator := context.allocator) -> string {
+	if strings.has_prefix(source, "odin.") {
+		return strings.clone(package_value, allocator)
+	}
+	return ""
+}
+
+capability_package_alias :: proc(package_value: string) -> string {
+	colon := strings.last_index_byte(package_value, ':')
+	value := package_value
+	if colon >= 0 {
+		value = package_value[colon + 1:]
+	}
+	return filepath.base(value)
+}
+
+capability_source_allowed :: proc(primitive: Capability_Primitive, source: string) -> bool {
+	if len(primitive.allowed_sources) == 0 {
+		return true
+	}
+	for allowed in primitive.allowed_sources {
+		if allowed == source {
+			return true
+		}
+	}
+	return false
+}
+
+capability_proc_parts :: proc(signature: string) -> (parameters, results: string, ok: bool) {
+	proc_offset := strings.index(signature, "proc")
+	if proc_offset < 0 {
+		return
+	}
+	open_offset := strings.index(signature[proc_offset:], "(")
+	if open_offset < 0 {
+		return
+	}
+	open_offset += proc_offset
+	depth := 1
+	close_offset := open_offset + 1
+	for close_offset < len(signature) && depth > 0 {
+		if signature[close_offset] == '(' {
+			depth += 1
+		} else if signature[close_offset] == ')' {
+			depth -= 1
+		}
+		close_offset += 1
+	}
+	if depth != 0 {
+		return
+	}
+	parameters = signature[open_offset + 1:close_offset - 1]
+	results = strings.trim_space(signature[close_offset:])
+	if strings.has_prefix(results, "->") {
+		results = strings.trim_space(results[2:])
+	} else {
+		results = ""
+	}
+	ok = true
+	return
+}
+
+capability_entry_compatible :: proc(
+	primitive: Capability_Primitive,
+	kind, signature, platform, source: string,
+) -> bool {
+	if primitive.kind != "" && primitive.kind != kind {
+		return false
+	}
+	if !capability_source_allowed(primitive, source) {
+		return false
+	}
+	if primitive.target_platform != "" && platform != "all" && platform != primitive.target_platform {
+		return false
+	}
+	parameters, results, proc_ok := capability_proc_parts(signature)
+	if (len(primitive.parameter_types) > 0 || len(primitive.result_types) > 0) && !proc_ok {
+		return false
+	}
+	for parameter_type in primitive.parameter_types {
+		if !strings.contains(parameters, parameter_type) {
+			return false
+		}
+	}
+	for result_type in primitive.result_types {
+		if !strings.contains(results, result_type) {
+			return false
+		}
+	}
+	is_generic := strings.contains(signature, "$")
+	if primitive.generic_requirement == "required" && !is_generic ||
+	   primitive.generic_requirement == "forbidden" && is_generic {
+		return false
+	}
+	// The lexical catalog cannot prove allocation or ownership semantics.
+	if primitive.allocation_behavior != "" || primitive.ownership_requirement != "" {
+		return false
+	}
+	return true
 }
 
 Capability_Catalog_Document :: struct {
@@ -253,6 +367,10 @@ capability_direct_consider :: proc(
 	if rank == 0 {
 		return
 	}
+	platform := capability_platform(file)
+	if !capability_entry_compatible(builder.primitive, kind, signature, platform, source) {
+		return
+	}
 	builder.has_exact = builder.has_exact || exact
 	if len(builder.matches) == CAPABILITY_MATCH_LIMIT {
 		last := builder.matches[len(builder.matches) - 1]
@@ -277,9 +395,20 @@ capability_direct_consider :: proc(
 		signature = capability_clip(signature, allocator = allocator),
 		docs = capability_clip(docs, allocator = allocator),
 		package_name = strings.clone(package_value, allocator),
+		import_path = capability_import_path(package_value, source, allocator),
+		qualified_symbol = strings.join(
+			{capability_package_alias(package_value), ".", name},
+			"",
+			allocator,
+		),
 		file = strings.clone(file, allocator),
 		line = line,
 		source = strings.clone(source, allocator),
+		excerpt = capability_clip(signature, allocator = allocator),
+		platform = strings.clone(platform, allocator),
+		allocation_behavior = "unknown",
+		ownership = "unknown",
+		unknown_properties = []string{"allocation_behavior", "ownership"},
 		rank = rank,
 		reasons = match_reasons,
 	}
@@ -337,6 +466,35 @@ capability_declaration :: proc(line: string) -> (name, kind: string, ok: bool) {
 	return
 }
 
+capability_declaration_signature :: proc(
+	text: string,
+	start: int,
+	kind: string,
+) -> string {
+	line_end := start
+	for line_end < len(text) && text[line_end] != '\n' {
+		line_end += 1
+	}
+	if kind != "procedure" && kind != "procedure_group" {
+		return strings.trim_space(text[start:line_end])
+	}
+	paren_depth := 0
+	index := start
+	limit := min(len(text), start + 4096)
+	for index < limit {
+		value := text[index]
+		if value == '(' {
+			paren_depth += 1
+		} else if value == ')' && paren_depth > 0 {
+			paren_depth -= 1
+		} else if value == '{' && paren_depth == 0 {
+			return strings.trim_space(text[start:index])
+		}
+		index += 1
+	}
+	return strings.trim_space(text[start:line_end])
+}
+
 capability_scan_source :: proc(
 	workspace_root, odin_root, target_root, path: string,
 	builders: []Capability_Audit_Builder,
@@ -384,6 +542,7 @@ capability_scan_source :: proc(
 			// Preserve the preceding documentation across top-level attributes.
 		} else {
 			if name, kind, declaration_ok := capability_declaration(line); declaration_ok {
+				signature := capability_declaration_signature(text, line_start, kind)
 				docs := ""
 				if docs_start >= 0 && docs_end >= docs_start {
 					docs = text[docs_start:docs_end]
@@ -408,12 +567,13 @@ capability_scan_source :: proc(
 						Capability_Catalog_Entry {
 							name = strings.clone(name, catalog_allocator),
 							kind = strings.clone(kind, catalog_allocator),
-							signature = strings.clone(trimmed, catalog_allocator),
+							signature = strings.clone(signature, catalog_allocator),
 							docs = strings.clone(docs, catalog_allocator),
 							package_value = strings.clone(package_value, catalog_allocator),
 							file = strings.clone(file, catalog_allocator),
 							absolute_path = strings.clone(path, catalog_allocator),
 							line = line_number,
+							platform = strings.clone(capability_platform(path), catalog_allocator),
 						},
 					)
 					capability_catalog_index_entry(catalog, len(catalog.entries) - 1)
@@ -423,7 +583,7 @@ capability_scan_source :: proc(
 					rank, exact, reasons, reason_count := capability_direct_rank(
 						&builder,
 						name,
-						trimmed,
+						signature,
 						docs,
 						package_value,
 						file,
@@ -432,7 +592,7 @@ capability_scan_source :: proc(
 						&builder,
 						name,
 						kind,
-						trimmed,
+						signature,
 						docs,
 						package_value,
 						file,
@@ -845,6 +1005,7 @@ capability_audit_catalog :: proc(
 	}
 	result.target_project = strings.clone(input.target_project, allocator)
 	result.compiler_root = strings.clone(catalog.odin_root, allocator)
+	result.generation = catalog.generation
 	result.results = make([]Capability_Primitive_Result, len(input.primitives), allocator)
 	for primitive, primitive_index in input.primitives {
 		if strings.trim_space(primitive.id) == "" || strings.trim_space(primitive.need) == "" {

@@ -60,6 +60,14 @@ Capability_Primitive :: struct {
 	id:           string,
 	need:         string,
 	search_terms: []string,
+	kind:         string,
+	parameter_types: []string,
+	result_types: []string,
+	generic_requirement: string,
+	target_platform: string,
+	allocation_behavior: string,
+	ownership_requirement: string,
+	allowed_sources: []string,
 }
 
 Capability_Audit_Input :: struct {
@@ -73,9 +81,17 @@ Capability_Match :: struct {
 	signature: string,
 	docs:      string,
 	package_name: string `json:"package"`,
+	import_path: string,
+	qualified_symbol: string,
 	file:      string,
 	line:      int,
 	source:    string,
+	excerpt:   string,
+	generic_constraints: string,
+	platform: string,
+	allocation_behavior: string,
+	ownership: string,
+	unknown_properties: []string,
 	rank:      int,
 	reasons:   []string,
 }
@@ -90,6 +106,7 @@ Capability_Primitive_Result :: struct {
 Capability_Audit_Result :: struct {
 	target_project: string,
 	compiler_root:  string,
+	generation:     u64,
 	results:        []Capability_Primitive_Result,
 }
 

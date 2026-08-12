@@ -162,7 +162,55 @@ capability_audit_finds_active_standard_library_symbols :: proc(t: ^testing.T) {
 	if len(result.results[0].matches) > 0 {
 		testing.expect_value(t, result.results[0].matches[0].name, "day_of_week")
 		testing.expect_value(t, result.results[0].matches[0].source, "odin.core")
+		testing.expect_value(t, result.results[0].matches[0].import_path, "core:time/datetime")
+		testing.expect_value(t, result.results[0].matches[0].qualified_symbol, "datetime.day_of_week")
+		testing.expect(t, len(result.results[0].matches[0].excerpt) > 0)
 	}
+}
+
+@(test)
+capability_audit_applies_structural_constraints :: proc(t: ^testing.T) {
+	root, root_error := os.get_absolute_path("tests/fixtures/workspace", context.temp_allocator)
+	testing.expect_value(t, root_error, nil)
+	if root_error != nil {
+		return
+	}
+	input := analysis.Capability_Audit_Input {
+		target_project = ".",
+		primitives = []analysis.Capability_Primitive{
+			{
+				id = "greet",
+				need = "format a greeting",
+				search_terms = []string{"greet"},
+				kind = "procedure",
+				parameter_types = []string{"^Person"},
+				result_types = []string{"string"},
+				target_platform = "darwin",
+			},
+			{
+				id = "wrong-result",
+				need = "format a greeting",
+				search_terms = []string{"greet"},
+				result_types = []string{"bool"},
+			},
+			{
+				id = "unknown-ownership",
+				need = "format a greeting with caller ownership",
+				search_terms = []string{"greet"},
+				ownership_requirement = "caller_owned",
+			},
+		},
+	}
+	result, _, audit_ok := analysis.capability_audit_workspace(root, input, context.temp_allocator)
+	testing.expect(t, audit_ok)
+	if !audit_ok || len(result.results) != 3 {
+		return
+	}
+	testing.expect_value(t, result.results[0].status, "available")
+	for match in result.results[1].matches {
+		testing.expect(t, match.name != "greet")
+	}
+	testing.expect_value(t, result.results[2].status, "not_found")
 }
 
 @(test)
