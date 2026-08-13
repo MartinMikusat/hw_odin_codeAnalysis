@@ -83,7 +83,9 @@ Start the newline-delimited JSON-RPC MCP transport with:
 hw-odin-analyze --root /Users/martin/projects/main mcp
 ```
 
-The server negotiates MCP protocol `2025-11-25`. It publishes batched tools for capability audits, symbol lookup and inspection, definitions and references, call graphs, outlines, package APIs, imports, diagnostics, impact analysis, and checked rename plans. Tool results include `structuredContent`, a JSON text fallback, generation identity, compiler identity, indexed roots, exclusions, scope, limits, and truncation state.
+The server negotiates MCP protocol `2025-11-25`. It publishes batched tools for capability audits, symbol lookup and inspection, definitions and references, call graphs, outlines, package APIs, imports, diagnostics, impact analysis, and checked rename plans.
+
+MCP results are optimized for agents. Discovery tools return compact symbol identities or ranked source locators. Symbol IDs are zero-based, so `0` is valid, and an agent must pass the selected ID with its returned generation to `inspect_symbol`. Alternatively, the agent can read the cited source under the returned workspace or compiler root. Successful calls carry one complete `structuredContent` value plus a short text summary; they do not duplicate the JSON as text. Every result retains its generation, configuration digest, source roots, and truncation state. The CLI continues to return the complete analysis records.
 
 `rename` returns a checked edit plan. It does not write source files.
 
@@ -144,15 +146,18 @@ expressions can return `Ambiguous` or `Unresolved`. Run `diagnostics` or
 ## Performance
 
 Run `./benchmark.sh` to measure the local fixture. On an Apple Silicon
-development machine, version `0.4.0` measured on 2026-08-12 with MCP usage recording active:
+development machine, version `0.5.0` measured on 2026-08-13 with MCP usage recording active:
 
-- Warm definition query: 3.0 ms mean across 100 runs.
-- Cold daemon startup and initial index: 21.1 ms mean across 10 runs.
-- Cold capability-catalog construction: 660.0 ms.
-- Warm indexed and recorded capability audit: 14.63 ms median across 30 runs.
-- Equivalent fresh `rg` scan of Odin `core`: 21.50 ms median across 30 runs.
-- Warm MCP speedup over the regular source scan: 1.47× median.
-- Usage database after the initialized session and 30 recorded audits: 548,864 bytes across 31 events.
+- Warm definition query: 2.8 ms mean across 100 runs.
+- Cold daemon startup and initial index: 21.2 ms mean across 10 runs.
+- Cold capability-catalog construction: 690.25 ms.
+- Warm indexed and recorded capability audit: 14.46 ms median across 29 warm runs.
+- Equivalent fresh `rg` scan of Odin `core`: 22.00 ms median across 30 runs.
+- Warm MCP speedup over the regular source scan: 1.52× median.
+- MCP tool catalog: 3,794 bytes.
+- Compact 40-match capability audit: 8,249 bytes.
+- Compact two-query symbol lookup: 982 bytes.
+- Usage database after the benchmark session: 196,608 bytes across 34 events.
 
 The values include process startup, socket transport, JSON encoding, and
 FSEvents synchronization.

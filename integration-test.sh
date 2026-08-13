@@ -71,6 +71,21 @@ capability="$({
 max_batch="$(jq -nc '{queries:[range(64)|{query:"greet"}]}')"
 usage_root="$(mktemp -d "${TMPDIR:-/tmp}/hw-odin-usage-XXXXXX")"
 usage_database="$usage_root/usage.sqlite3"
+startup_root="$usage_root/startup-root"
+startup_database="$usage_root/startup.sqlite3"
+mkdir "$startup_root"
+printf 'package broken\nbroken :: proc(' >"$startup_root/broken.odin"
+startup_mcp="$({
+  printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"startup-test","version":"1"}}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+} | HW_ODIN_ANALYZE_USAGE_DB="$startup_database" \
+      ./build/hw-odin-analyze --root "$startup_root" mcp)"
+printf '%s\n' "$startup_mcp" | jq -e -s '
+  (map(select(.id == 1))[0].result.protocolVersion == "2025-11-25") and
+  (map(select(.id == 2))[0].result.tools | map(.name) | index("lookup_symbols") != null)
+' >/dev/null
+
 mcp="$({
   printf '%s\n' \
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"integration-test","version":"1"}}}' \
@@ -146,16 +161,18 @@ printf '%s\n' "$inspect_usage" | jq -e '
 failed_batch_usage="$(
   HW_ODIN_ANALYZE_USAGE_DB="$usage_database" \
     ./build/hw-odin-analyze --root "$root" --compact usage recent \
-      --days 1 --tool lookup_symbols --limit 1
+      --days 1 --tool lookup_symbols --limit 4
 )"
 printf '%s\n' "$failed_batch_usage" | jq -e '
-  (.events | length == 1) and
-  (.events[0].outcome == "tool_error") and
-  (.events[0].error_message == "query is required") and
-  (.events[0].result_count == 0) and
-  (.events[0].empty_result_count == 0) and
-  (.events[0].ambiguous_count == 0) and
-  (.events[0].unresolved_count == 0)
+  ([.events[] | select(
+    (.outcome == "tool_error") and (.error_message == "query is required")
+  )] | length == 1) and
+  ([.events[] | select(.error_message == "query is required")][0] |
+    (.result_count == 0) and
+    (.empty_result_count == 0) and
+    (.ambiguous_count == 0) and
+    (.unresolved_count == 0)
+  )
 ' >/dev/null
 
 usage_recent="$(
@@ -170,6 +187,201 @@ printf '%s\n' "$usage_recent" | jq -e '
   (.events[0].request_payload == "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"missing_tool\",\"arguments\":{}}}") and
   (.events[0].response_payload == "{\"jsonrpc\":\"2.0\",\"id\":5,\"error\":{\"code\":-32602,\"message\":\"unknown tool name\"}}")
 ' >/dev/null
+
+compact_database="$usage_root/compact.sqlite3"
+python3 - "$root" "$compact_database" <<'PY'
+import json
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+
+root = sys.argv[1]
+database = sys.argv[2]
+environment = os.environ.copy()
+environment["HW_ODIN_ANALYZE_USAGE_DB"] = database
+process = subprocess.Popen(
+    ["./build/hw-odin-analyze", "--root", root, "mcp"],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    env=environment,
+)
+
+def call(request):
+    process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+    process.stdin.flush()
+    response_line = process.stdout.readline()
+    if not response_line:
+        raise RuntimeError(process.stderr.read())
+    return len(response_line.rstrip("\n").encode()), json.loads(response_line)
+
+def tool_call(request_id, name, arguments):
+    response_bytes, response = call({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    })
+    result = response["result"]
+    assert result["content"][0]["text"].startswith(f"ok: {name};")
+    assert len(result["content"][0]["text"].encode()) <= 160
+    assert not result["content"][0]["text"].startswith("{")
+    structured = result["structuredContent"]
+    assert not {
+        "compiler_release",
+        "compiler_root",
+        "indexed_roots",
+        "excluded_paths",
+        "fsevents_flushed",
+        "query_scope",
+        "result_limit",
+    }.intersection(structured)
+    return response_bytes, structured
+
+_, initialized = call({
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2025-06-18",
+        "clientInfo": {"name": "codex-mcp-client", "version": "integration"},
+    },
+})
+assert initialized["result"]["serverInfo"]["version"] == "0.5.0"
+
+tool_list_bytes, listed = call({
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "tools/list",
+    "params": {},
+})
+assert tool_list_bytes <= 4500
+tools = {tool["name"]: tool for tool in listed["result"]["tools"]}
+lookup_properties = tools["lookup_symbols"]["inputSchema"]["properties"]["queries"]["items"]["properties"]
+symbol_properties = tools["inspect_symbol"]["inputSchema"]["properties"]["queries"]["items"]["properties"]
+file_properties = tools["file_outline"]["inputSchema"]["properties"]["queries"]["items"]["properties"]
+rename_properties = tools["rename"]["inputSchema"]["properties"]["queries"]["items"]["properties"]
+assert set(lookup_properties) == {"query"}
+assert set(symbol_properties) == {"symbol_id", "generation", "file", "line", "column"}
+assert symbol_properties["symbol_id"]["minimum"] == 0
+assert set(file_properties) == {"file", "scope"}
+assert set(rename_properties) == {
+    "symbol_id", "generation", "file", "line", "column", "new_name",
+}
+assert rename_properties["symbol_id"]["minimum"] == 0
+
+audit_bytes, audit = tool_call(3, "audit_primitives", {
+    "target_project": ".",
+    "primitives": [
+        {"id": "weekday", "need": "calculate a weekday", "search_terms": ["day_of_week"]},
+        {"id": "json", "need": "encode JSON values", "search_terms": ["json.Value", "json.marshal"]},
+        {"id": "allocate", "need": "allocate temporary arrays", "search_terms": ["make", "append"]},
+        {"id": "time", "need": "read time values", "search_terms": ["time.now", "time"]},
+        {"id": "string", "need": "join string values", "search_terms": ["strings.join", "join"]},
+    ],
+})
+assert audit_bytes <= 15000
+assert sum(len(result["matches"]) for result in audit["results"]) == 40
+assert all(result["status"] == "available" for result in audit["results"])
+removed_match_fields = {
+    "signature", "docs", "excerpt", "reasons", "unknown_properties",
+    "allocation_behavior", "ownership", "platform", "package",
+}
+for primitive in audit["results"]:
+    assert "need" not in primitive
+    for match in primitive["matches"]:
+        assert not removed_match_fields.intersection(match)
+        source_root = audit["roots"][
+            "compiler" if match["source"].startswith("odin.") else "workspace"
+        ]
+        assert Path(source_root, match["file"]).is_file()
+
+lookup_bytes, lookup = tool_call(4, "lookup_symbols", {
+    "queries": [{"query": "Person"}, {"query": "greet"}],
+})
+assert lookup_bytes <= 1000
+person = next(symbol for symbol in lookup["results"][0] if symbol["name"] == "Person")
+greet = next(symbol for symbol in lookup["results"][1] if symbol["name"] == "greet")
+assert person["symbol_id"] == 0
+assert not {"detail", "documentation", "range", "extent", "path"}.intersection(greet)
+source_line = Path(lookup["roots"]["workspace"], greet["file"]).read_text().splitlines()[greet["line"] - 1]
+assert "greet :: proc" in source_line
+
+_, inspected = tool_call(5, "inspect_symbol", {
+    "queries": [
+        {"symbol_id": person["symbol_id"], "generation": lookup["generation"]},
+        {"symbol_id": greet["symbol_id"], "generation": lookup["generation"]},
+    ],
+})
+assert inspected["results"][0]["symbols"][0]["symbol_id"] == 0
+assert inspected["results"][0]["symbols"][0]["name"] == "Person"
+inspected_symbol = inspected["results"][1]["symbols"][0]
+assert inspected_symbol["symbol_id"] == greet["symbol_id"]
+assert inspected_symbol["signature"] == "proc(person: ^Person) -> string"
+assert not {"detail", "range", "extent", "explanation"}.intersection(inspected_symbol)
+
+_, definitions = tool_call(6, "definition_and_references", {
+    "queries": [{"file": "main.odin", "line": 15, "column": 6}],
+})
+assert definitions["results"][0]["definition"]["resolution"] == "Exact"
+assert len(definitions["results"][0]["references"]) == 2
+assert "offset" not in definitions["results"][0]["references"][0]
+
+_, graph = tool_call(7, "call_graph", {
+    "queries": [{"symbol_id": greet["symbol_id"], "generation": lookup["generation"]}],
+})
+assert graph["results"][0]["callers"][0]["name"] == "run"
+
+_, outline = tool_call(8, "file_outline", {"queries": [{"file": "main.odin"}]})
+assert [symbol["name"] for symbol in outline["results"][0]] == ["Person", "greet", "run"]
+
+_, package_api = tool_call(9, "package_api", {"queries": [{"query": "fixture"}]})
+assert any(symbol["name"] == "greet" for symbol in package_api["results"][0])
+
+_, imports = tool_call(10, "imports", {"queries": [{"file": "main.odin"}]})
+assert imports["results"][0][0]["import_path"] == "./helper"
+assert "range" not in imports["results"][0][0]
+
+_, diagnostics = tool_call(11, "diagnostics", {"queries": [{"file": "main.odin"}]})
+assert diagnostics["results"] == [[]]
+
+_, impact = tool_call(12, "impact_analysis", {
+    "queries": [{"symbol_id": greet["symbol_id"], "generation": lookup["generation"]}],
+})
+assert impact["results"][0]["affected_packages"] == ["fixture"]
+assert impact["results"][0]["callers"][0]["name"] == "run"
+
+_, rename = tool_call(13, "rename", {
+    "queries": [{
+        "symbol_id": greet["symbol_id"],
+        "generation": lookup["generation"],
+        "new_name": "welcome",
+    }],
+})
+assert len(rename["results"][0]) == 2
+assert all(edit["new_text"] == "welcome" for edit in rename["results"][0])
+assert all(not {"path", "range", "offset"}.intersection(edit) for edit in rename["results"][0])
+
+process.stdin.close()
+assert process.wait(timeout=10) == 0, process.stderr.read()
+
+with sqlite3.connect(database) as connection:
+    recorded_tool_list = connection.execute(
+        "SELECT response_bytes FROM mcp_events WHERE method='tools/list'"
+    ).fetchone()[0]
+    recorded_audit = connection.execute(
+        "SELECT response_bytes FROM mcp_events WHERE tool_name='audit_primitives'"
+    ).fetchone()[0]
+    recorded_lookup = connection.execute(
+        "SELECT response_bytes FROM mcp_events WHERE tool_name='lookup_symbols'"
+    ).fetchone()[0]
+assert recorded_tool_list == tool_list_bytes
+assert recorded_audit == audit_bytes
+assert recorded_lookup == lookup_bytes
+PY
 
 usage_writer_pids=()
 for writer in 1 2; do
@@ -243,12 +455,25 @@ initialized = call({
     },
 })
 assert initialized["id"] == 1
+ready = call({
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "tools/call",
+    "params": {
+        "name": "lookup_symbols",
+        "arguments": {"queries": [{"query": "run"}]},
+    },
+})
+assert any(
+    match["name"] == "run"
+    for match in ready["result"]["structuredContent"]["results"][0]
+)
 Path(root, "code-analysis.json").write_text(
     '{"exclude_paths":["ignored"]}\n',
     encoding="utf-8",
 )
 
-for request_id in range(2, 102):
+for request_id in range(3, 103):
     time.sleep(0.05)
     response = call({"jsonrpc": "2.0", "id": request_id, "method": "ping"})
     assert response == {"jsonrpc": "2.0", "id": request_id, "result": {}}

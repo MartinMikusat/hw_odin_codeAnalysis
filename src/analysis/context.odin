@@ -163,24 +163,31 @@ context_build_declaration_indexes :: proc(state: ^Analysis_Context) {
 	}
 }
 
-context_build_occurrence_indexes :: proc(state: ^Analysis_Context) {
+context_build_occurrence_path_index :: proc(state: ^Analysis_Context) {
 	allocator := virtual_arena_allocator(state)
-	state.occurrences_by_symbol = make(map[Symbol_ID][dynamic]int, allocator = allocator)
 	state.occurrences_by_path = make(map[string][dynamic]int, allocator = allocator)
 	for occurrence, occurrence_index in state.occurrences {
-		if int(occurrence.symbol) >= 0 {
-			append_index_value(
-				Symbol_ID,
-				&state.occurrences_by_symbol,
-				occurrence.symbol,
-				occurrence_index,
-				allocator,
-			)
-		}
 		append_index_value(
 			string,
 			&state.occurrences_by_path,
 			occurrence.path,
+			occurrence_index,
+			allocator,
+		)
+	}
+}
+
+context_build_occurrence_symbol_index :: proc(state: ^Analysis_Context) {
+	allocator := virtual_arena_allocator(state)
+	state.occurrences_by_symbol = make(map[Symbol_ID][dynamic]int, allocator = allocator)
+	for occurrence, occurrence_index in state.occurrences {
+		if int(occurrence.symbol) < 0 {
+			continue
+		}
+		append_index_value(
+			Symbol_ID,
+			&state.occurrences_by_symbol,
+			occurrence.symbol,
 			occurrence_index,
 			allocator,
 		)
@@ -211,14 +218,15 @@ context_build_index :: proc(state: ^Analysis_Context) -> bool {
 		return false
 	}
 	context_build_declaration_indexes(state)
+	context_build_occurrence_path_index(state)
 	if !resolve_occurrences(state) {
 		return false
 	}
-	context_build_occurrence_indexes(state)
+	context_build_occurrence_symbol_index(state)
 	return true
 }
 
-context_init :: proc(state: ^Analysis_Context, root: string) -> bool {
+context_prepare :: proc(state: ^Analysis_Context, root: string) -> bool {
 	if !context_allocate_index(state) {
 		return false
 	}
@@ -233,6 +241,13 @@ context_init :: proc(state: ^Analysis_Context, root: string) -> bool {
 	state.config, state.config_digest, config_ok = load_config(root)
 	if !config_ok {
 		context_destroy(state)
+		return false
+	}
+	return true
+}
+
+context_init :: proc(state: ^Analysis_Context, root: string) -> bool {
+	if !context_prepare(state, root) {
 		return false
 	}
 	if !context_build_index(state) {

@@ -45,13 +45,24 @@ def call(request):
     started = time.perf_counter_ns()
     process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
     process.stdin.flush()
-    response = json.loads(process.stdout.readline())
-    return (time.perf_counter_ns() - started) / 1e6, response
+    response_line = process.stdout.readline()
+    response = json.loads(response_line)
+    return (
+        (time.perf_counter_ns() - started) / 1e6,
+        len(response_line.rstrip("\n").encode()),
+        response,
+    )
 
 call({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}})
-request = {
+_, tools_list_bytes, _ = call({
     "jsonrpc": "2.0",
     "id": 1,
+    "method": "tools/list",
+    "params": {},
+})
+request = {
+    "jsonrpc": "2.0",
+    "id": 2,
     "method": "tools/call",
     "params": {
         "name": "audit_primitives",
@@ -68,12 +79,46 @@ request = {
 warm = []
 cold_index_ms = 0
 for run in range(30):
-    request["id"] = run + 1
-    elapsed, response = call(request)
+    request["id"] = run + 2
+    elapsed, _, response = call(request)
     result = response["result"]["structuredContent"]
     assert result["results"][0]["status"] == "available"
-    cold_index_ms = result["last_rebuild_nanoseconds"] / 1e6
-    warm.append(elapsed)
+    if run == 0:
+        cold_index_ms = elapsed
+    else:
+        warm.append(elapsed)
+
+_, audit_response_bytes, audit_response = call({
+    "jsonrpc": "2.0",
+    "id": 32,
+    "method": "tools/call",
+    "params": {
+        "name": "audit_primitives",
+        "arguments": {
+            "target_project": ".",
+            "primitives": [
+                {"id": "weekday", "need": "calculate a weekday", "search_terms": ["day_of_week"]},
+                {"id": "json", "need": "encode JSON values", "search_terms": ["json.Value", "json.marshal"]},
+                {"id": "allocate", "need": "allocate temporary arrays", "search_terms": ["make", "append"]},
+                {"id": "time", "need": "read time values", "search_terms": ["time.now", "time"]},
+                {"id": "string", "need": "join string values", "search_terms": ["strings.join", "join"]},
+            ],
+        },
+    },
+})
+assert sum(
+    len(result["matches"])
+    for result in audit_response["result"]["structuredContent"]["results"]
+) == 40
+_, lookup_response_bytes, _ = call({
+    "jsonrpc": "2.0",
+    "id": 33,
+    "method": "tools/call",
+    "params": {
+        "name": "lookup_symbols",
+        "arguments": {"queries": [{"query": "greet"}, {"query": "run"}]},
+    },
+})
 process.stdin.close()
 process.wait()
 
@@ -96,6 +141,9 @@ report = {
     "mcp_warm_median_ms": statistics.median(warm),
     "rg_core_median_ms": statistics.median(regular),
     "median_speedup": statistics.median(regular) / statistics.median(warm),
+    "tools_list_response_bytes": tools_list_bytes,
+    "audit_40_match_response_bytes": audit_response_bytes,
+    "lookup_two_query_response_bytes": lookup_response_bytes,
     "usage_database_bytes": os.path.getsize(os.environ["HW_ODIN_ANALYZE_USAGE_DB"]),
     "usage_event_count": sqlite3.connect(
         os.environ["HW_ODIN_ANALYZE_USAGE_DB"]
@@ -103,4 +151,7 @@ report = {
 }
 print(json.dumps(report, indent=2))
 assert report["median_speedup"] > 1
+assert report["tools_list_response_bytes"] <= 4500
+assert report["audit_40_match_response_bytes"] <= 15000
+assert report["lookup_two_query_response_bytes"] <= 1000
 PY

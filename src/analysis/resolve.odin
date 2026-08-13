@@ -348,9 +348,9 @@ resolve_base_symbol :: proc(
 ) -> Symbol_ID {
 	best := Symbol_ID(-1)
 	best_offset := -1
-	for candidate in state.occurrences {
-		if candidate.path != occurrence.path ||
-		   candidate.name != occurrence.selector_base ||
+	for candidate_index in state.occurrences_by_path[occurrence.path] {
+		candidate := state.occurrences[candidate_index]
+		if candidate.name != occurrence.selector_base ||
 		   candidate.range.start.offset >= occurrence.range.start.offset ||
 		   int(candidate.symbol) < 0 {
 			continue
@@ -374,7 +374,8 @@ resolve_field_selector :: proc(
 	}
 	base := state.symbols[int(base_id)]
 	type_symbol := Symbol_ID(-1)
-	for candidate in state.symbols {
+	for candidate_id in state.symbols_by_package[base.package_directory] {
+		candidate := state.symbols[int(candidate_id)]
 		if candidate.kind != .Struct &&
 		   candidate.kind != .Union &&
 		   candidate.kind != .Enum {
@@ -455,8 +456,9 @@ enclosing_procedure :: proc(
 ) -> (^Symbol, bool) {
 	best: ^Symbol
 	best_size := max(int)
-	for &symbol in state.symbols {
-		if symbol.path != path || symbol.kind != .Procedure {
+	for symbol_id in state.symbols_by_path[path] {
+		symbol := &state.symbols[int(symbol_id)]
+		if symbol.kind != .Procedure {
 			continue
 		}
 		if offset < symbol.extent.start.offset || offset >= symbol.extent.end.offset {
@@ -464,7 +466,7 @@ enclosing_procedure :: proc(
 		}
 		size := symbol.extent.end.offset - symbol.extent.start.offset
 		if size < best_size {
-			best = &symbol
+			best = symbol
 			best_size = size
 		}
 	}

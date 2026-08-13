@@ -2,6 +2,13 @@
 
 Work in the order below. Build the persistent indexes and test boundaries before expanding the MCP surface, then make reuse results directly actionable before adding broader navigation and refactoring queries.
 
+## Completed in 0.5.0
+
+- [x] Replace duplicated MCP JSON with one compact `structuredContent` value and a bounded text summary.
+- [x] Return ranked capability and symbol source locators by default, then expand only selected symbols through `inspect_symbol` or direct source reads.
+- [x] Project definitions, references, call graphs, outlines, package APIs, imports, diagnostics, impact records, and rename edits into compact agent-facing records without changing CLI output.
+- [x] Reduce the persistent tool catalog with operation-specific input schemas and record response-size budgets against the local usage database.
+
 ## Completed in 0.4.0
 
 - [x] Record every MCP input line and emitted response line in a global SQLite database, with session, workspace, client, compiler, configuration, outcome, latency, batch, result, resolution, truncation, byte-count, and SHA-256 metadata.
@@ -48,18 +55,15 @@ Completion: semantic fixtures return the expected resolution kind and locations,
 
 ## P2 — Agent query surface
 
-### 3. Return an executable reuse recipe
+### 3. Return an actionable reuse locator
 
 For each `available` or `candidate` match, return:
 
-- the exact import string and qualified symbol;
-- declaration kind and complete procedure or type signature;
-- generic constraints and platform or conditional-file restrictions when known;
-- source ownership, source path, line, and a bounded declaration excerpt;
-- relevant documentation and the concrete reasons for the rank;
-- the index generation and compiler release used for the result.
+- the import string and qualified symbol when available;
+- declaration kind, source ownership, source path, line, and rank;
+- the index generation, configuration digest, workspace root, and compiler root used for the result.
 
-Completion: an agent can turn an `available` result into the correct import and call shape without a second search. Every reported path and excerpt resolves to the same indexed generation.
+Completion: an agent can resolve every reported source location against the returned roots, inspect the declaration directly, and avoid loading complete signatures, excerpts, documentation, rank reasons, and repeated metadata for candidates it will not use.
 
 ### 4. Accept structural primitive constraints
 
@@ -88,7 +92,7 @@ Completion: every existing read-only CLI query has an MCP equivalent with struct
 
 ### 6. Explain ambiguous and unresolved results
 
-Return the active package, visible imports, applicable scope chain, shadowing declaration, competing declarations, rejected candidates, and the analyzer boundary that prevented exact resolution. Distinguish missing declarations from unsupported inference, overload resolution, polymorphic specialization, implicit selectors, conditional-file evaluation, and general `using` behavior.
+Return the resolution kind, matching symbol locators, reason, next action, and analyzer boundary. Distinguish missing declarations from unsupported inference, overload resolution, polymorphic specialization, implicit selectors, conditional-file evaluation, and general `using` behavior without embedding the complete internal resolution trace.
 
 Completion: every `Ambiguous` or `Unresolved` result contains a structured reason and at least one concrete next action when further source inspection or an `hw-odin check` can resolve it.
 
@@ -103,14 +107,18 @@ Completion: every `Ambiguous` or `Unresolved` result contains a structured reaso
 
 Completion: an agent can inspect the complete known impact of a symbol change and obtain a generation-bound rename plan without modifying source files.
 
-### 8. Report freshness and analysis boundaries on every response
+### 8. Report compact freshness and source roots on every response
 
-Include the index generation, configuration digest, active compiler release and root, FSEvents flush state, query scope, excluded paths, result limit, and truncation state in every MCP result.
+Include the index generation, configuration digest, workspace and compiler source roots, and truncation state in every MCP result. Include a match limit only where capability results are explicitly bounded.
 
-Completion: an agent can detect stale or differently scoped results before combining them, and a truncated or bounded negative search cannot be mistaken for proof of absence.
+Completion: an agent can reject stale symbol identities, resolve source locators, and detect truncated results without paying for compiler release, indexed-root, exclusion, watcher, scope, and limit metadata on every call.
 
 ## Deferred and excluded
 
+- [ ] **Potential extension — evaluate a compact structural edit planner for recurring Odin refactors.**
+  - Intent: replace token-heavy `apply_patch` inputs that repeat absolute paths, removed source, unchanged context, and string escaping with generation-bound operations on qualified Odin symbols and syntax nodes. Candidate operations include extracting or moving nodes, wrapping a statement range, replacing a resolved call, and guarding resolved statements with a condition.
+  - Output boundary: resolve each operation against the persistent Odin index and AST, reject ambiguous or stale inputs, and return one atomic checked edit plan with the affected symbols and syntax diagnostics. Keep source mutation in the calling agent; the analysis server must not write files.
+  - Decision gate: replay representative archived Odin `apply_patch` calls through a prototype and compare complete request-and-response token counts, resulting text edits, ambiguity handling, and stale-source rejection. Adopt the extension only when it reduces total edit traffic without moving open-ended refactor planning into the server or adding primitives tailored to one patch.
 - Do not add source-writing MCP tools. Keep rename and future refactors as checked edit plans.
 - Do not implement a full editor language-server protocol unless a separate product requirement establishes that scope.
 - Defer embedding-based semantic search until persistent structural and lexical indexes have measured recall gaps.
