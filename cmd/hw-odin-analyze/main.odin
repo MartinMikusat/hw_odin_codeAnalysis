@@ -20,7 +20,7 @@ IDLE_TIMEOUT_SECONDS :: 15 * 60
 REQUEST_READ_TIMEOUT :: 1 * time.Second
 
 print_usage :: proc() {
-	fmt.println(`hw-odin-analyze [--root PATH] [--compact] COMMAND
+	fmt.println(`hw-odin-analyze [--root PATH] [--compact] [--tsv] COMMAND
 
 Commands:
   capability-audit < INPUT.json
@@ -47,7 +47,11 @@ Commands:
   restart
   stop
   version
-  help`)
+  help
+
+--tsv writes outline, search, and package-api results as tab-separated
+rows (line, kind, name, detail) instead of JSON. Kind names are short
+(proc, struct, enum, ...) and details are flattened to one line.`)
 }
 
 fail :: proc(message: string) -> ! {
@@ -59,6 +63,7 @@ parse_arguments :: proc() -> (
 	root: string,
 	root_explicit: bool,
 	compact: bool,
+	tsv: bool,
 	arguments: [dynamic]string,
 ) {
 	root_error: os.Error
@@ -71,6 +76,8 @@ parse_arguments :: proc() -> (
 		argument := os.args[index]
 		if argument == "--compact" {
 			compact = true
+		} else if argument == "--tsv" {
+			tsv = true
 		} else if argument == "--root" {
 			if index + 1 >= len(os.args) {
 				fail("--root requires a path")
@@ -106,6 +113,67 @@ write_json :: proc(value: any, compact: bool) {
 		fail("failed to encode JSON output")
 	}
 	fmt.println(string(data))
+}
+
+tsv_kind :: proc(kind: analysis.Symbol_Kind) -> string {
+	#partial switch kind {
+	case .Package:         return "pkg"
+	case .Import:          return "imp"
+	case .Constant:        return "const"
+	case .Variable:        return "var"
+	case .Procedure:       return "proc"
+	case .Procedure_Group: return "procs"
+	case .Struct:          return "struct"
+	case .Union:           return "union"
+	case .Enum:            return "enum"
+	case .Field:           return "field"
+	case .Parameter:       return "param"
+	}
+	return "?"
+}
+
+// Collapse tabs and whitespace runs so every row stays a single line with
+// exactly four tab-separated fields.
+tsv_flatten_detail :: proc(detail: string, allocator := context.allocator) -> string {
+	flattened := make([dynamic]u8, 0, len(detail), allocator)
+	prior_space := false
+	for byte_value in detail {
+		is_space := byte_value == ' ' || byte_value == '	' || byte_value == '\n' || byte_value == '\r'
+		if is_space {
+			if prior_space { continue }
+			prior_space = true
+			append(&flattened, u8(' '))
+		} else {
+			prior_space = false
+			append(&flattened, u8(byte_value))
+		}
+	}
+	return transmute(string)flattened[:]
+}
+
+// Write []Symbol rows in the compact agent-facing form:
+// line, short kind, name, one-line detail.
+write_symbols_tsv :: proc(symbols: []analysis.Symbol) {
+	builder := strings.builder_make(context.temp_allocator)
+	defer strings.builder_destroy(&builder)
+	fmt.sbprintf(
+		&builder,
+		"line	kind	name	detail\n",
+	)
+	for symbol in symbols {
+		name, _ := strings.replace_all(symbol.name, "	", " ", context.temp_allocator)
+		detail := tsv_flatten_detail(symbol.detail, context.temp_allocator)
+		detail, _ = strings.replace_all(detail, "	", " ", context.temp_allocator)
+		fmt.sbprintf(
+			&builder,
+			"%d	%s	%s	%s\n",
+			symbol.range.start.line,
+			tsv_kind(symbol.kind),
+			name,
+			detail,
+		)
+	}
+	fmt.println(strings.to_string(builder))
 }
 
 parse_positive_option :: proc(name, source: string, maximum: int) -> int {
@@ -1632,9 +1700,29 @@ run_daemon :: proc(root: string) {
 	}
 }
 
+// Symbol-list commands whose payloads are a plain []Symbol JSON array.
+symbol_list_command :: proc(command: string) -> bool {
+	switch command {
+	case "outline", "search", "package-api":
+		return true
+	}
+	return false
+}
+
+// Convert a compact []Symbol JSON payload into TSV rows. The daemon always
+// speaks JSON; the client down-converts so the wire protocol stays unchanged.
+write_payload_symbols_tsv :: proc(payload: string) {
+	symbols: []analysis.Symbol
+	if decode_error := json.unmarshal_string(payload, &symbols, allocator = context.temp_allocator); decode_error != nil {
+		fail("the command payload is not a symbol list and cannot be written as TSV")
+	}
+	write_symbols_tsv(symbols)
+}
+
 run_client :: proc(
 	root: string,
 	compact: bool,
+	tsv: bool,
 	arguments: []string,
 ) {
 	paths, paths_ok := transport.runtime_paths(root)
@@ -1694,11 +1782,15 @@ run_client :: proc(
 	if !response.ok {
 		fail(response.error)
 	}
+	if tsv && symbol_list_command(command) {
+		write_payload_symbols_tsv(response.payload)
+		return
+	}
 	fmt.println(response.payload)
 }
 
 main :: proc() {
-	root, root_explicit, compact, arguments := parse_arguments()
+	root, root_explicit, compact, tsv, arguments := parse_arguments()
 	defer delete(root)
 
 	if len(arguments) == 0 || arguments[0] == "help" {
@@ -1731,5 +1823,5 @@ main :: proc() {
 		run_usage_report(root, root_explicit, compact, arguments[:])
 		return
 	}
-	run_client(root, compact, arguments[:])
+	run_client(root, compact, tsv, arguments[:])
 }

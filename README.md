@@ -40,6 +40,13 @@ Run `build/hw-odin-analyze help` for the complete command list.
 
 Analysis commands emit JSON and do not change source files. Source positions use one-based lines and UTF-8 byte columns.
 
+The `outline`, `search`, and `package-api` commands accept `--tsv`. The flag
+replaces the JSON array with one row per symbol in a tab-separated
+`line`, `kind`, `name`, `detail` form. Kind labels are short (`proc`,
+`struct`, `enum`, `const`, `var`, ...), details collapse to one line, and
+tabs inside values become spaces. The flag targets agents that read
+outlines as text; every other command keeps its JSON output.
+
 The executable starts one daemon for each analysis root. The client and daemon
 exchange length-prefixed JSON through a Unix-domain socket. The daemon exits
 after 15 minutes without a request. It closes incomplete requests after one
