@@ -506,6 +506,11 @@ parse_file_into_context :: proc(
 	if record.ast_file.pkg_name != "" {
 		record.package_name = strings.clone(record.ast_file.pkg_name, arena_allocator)
 	}
+	// Files the compiler would not build for this target (other platforms'
+	// variants of the same declarations) would make every use ambiguous.
+	if !is_builtin && !file_builds_for_host(&record.ast_file, filepath.base(path)) {
+		return true
+	}
 
 	append(&state.files, record)
 	file := &state.files[len(state.files) - 1]
@@ -830,4 +835,42 @@ collect_file :: proc(
 	if collect_import_declarations {
 		collect_imports(state, file)
 	}
+}
+
+// The compiler's file selection for the host target: `#+build` tags and the
+// _<os>, _<arch>, or _<os>_<arch> file-name suffixes.
+file_builds_for_host :: proc(file: ^ast.File, file_name: string) -> bool {
+	tags := parser.parse_file_tags(file^, context.temp_allocator)
+	if !parser.match_build_tags(tags, {os = ODIN_OS, arch = ODIN_ARCH}) {
+		return false
+	}
+	return file_name_builds_for(file_name, ODIN_OS, ODIN_ARCH)
+}
+
+file_name_builds_for :: proc(file_name: string, os: runtime.Odin_OS_Type, arch: runtime.Odin_Arch_Type) -> bool {
+	stem := strings.trim_suffix(file_name, ".odin")
+	last_separator := strings.last_index_byte(stem, '_')
+	if last_separator <= 0 {
+		return true
+	}
+	last := stem[last_separator + 1:]
+	if last_os, _ := parser.get_build_os_from_string(last); last_os != .Unknown {
+		return last_os == os
+	}
+	last_arch := parser.get_build_arch_from_string(last)
+	if last_arch == .Unknown {
+		return true
+	}
+	if last_arch != arch {
+		return false
+	}
+	head := stem[:last_separator]
+	previous_separator := strings.last_index_byte(head, '_')
+	if previous_separator <= 0 {
+		return true
+	}
+	if previous_os, _ := parser.get_build_os_from_string(head[previous_separator + 1:]); previous_os != .Unknown {
+		return previous_os == os
+	}
+	return true
 }

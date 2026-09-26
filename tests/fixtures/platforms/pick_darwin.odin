@@ -1,0 +1,3 @@
+package platforms
+
+pick :: proc() {}

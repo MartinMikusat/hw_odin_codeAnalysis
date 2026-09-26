@@ -1205,3 +1205,58 @@ configured_collection_symbols_remain_renameable :: proc(t: ^testing.T) {
 	)
 	testing.expect_value(t, len(edits), 2)
 }
+
+@(test)
+platform_variants_resolve_to_the_host_file :: proc(t: ^testing.T) {
+	// Only pick_darwin.odin builds for the macOS/arm64 host; the Windows, amd64,
+	// and js variants of pick would otherwise make the call ambiguous.
+	when ODIN_OS != .Darwin || ODIN_ARCH != .arm64 {return}
+	state, ok := fixture_context_at("tests/fixtures/platforms")
+	testing.expect(t, ok)
+	if !ok {
+		return
+	}
+	defer analysis.context_destroy(&state)
+
+	pick_files := 0
+	for file in state.files {
+		if strings.has_prefix(file.relative_path, "pick") || file.relative_path == "tagged.odin" {
+			pick_files += 1
+			testing.expect_value(t, file.relative_path, "pick_darwin.odin")
+		}
+	}
+	testing.expect_value(t, pick_files, 1)
+	resolved := false
+	for occurrence in state.occurrences {
+		if occurrence.name != "pick" || occurrence.path != "main.odin" {continue}
+		testing.expect(t, int(occurrence.symbol) >= 0)
+		if int(occurrence.symbol) >= 0 {
+			resolved = state.symbols[int(occurrence.symbol)].path == "pick_darwin.odin"
+		}
+	}
+	testing.expect(t, resolved)
+}
+
+@(test)
+file_name_suffixes_select_the_target :: proc(t: ^testing.T) {
+	Case :: struct {
+		name:   string,
+		builds: bool,
+	}
+	cases := []Case {
+		{"main.odin", true},
+		{"file_darwin.odin", true},
+		{"file_windows.odin", false},
+		{"file_js.odin", false},
+		{"file_arm64.odin", true},
+		{"file_amd64.odin", false},
+		{"file_darwin_arm64.odin", true},
+		{"file_darwin_amd64.odin", false},
+		{"file_linux_arm64.odin", false},
+		{"my_helper.odin", true},
+	}
+	for entry in cases {
+		builds := analysis.file_name_builds_for(entry.name, .Darwin, .arm64)
+		testing.expectf(t, builds == entry.builds, "%s: expected %v", entry.name, entry.builds)
+	}
+}
