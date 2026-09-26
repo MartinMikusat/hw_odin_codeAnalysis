@@ -19,6 +19,7 @@ File_Record :: struct {
 }
 
 Analysis_Context :: struct {
+	scan:        Scan_State,
 	root:        string,
 	odin_root:   string,
 	config:      Config,
@@ -230,7 +231,7 @@ context_prepare :: proc(state: ^Analysis_Context, root: string) -> bool {
 	if !context_allocate_index(state) {
 		return false
 	}
-	state.root = strings.clone(root)
+	state.root = normalized_path(root)
 	odin_root_ok: bool
 	state.odin_root, odin_root_ok = resolve_odin_root()
 	if !odin_root_ok {
@@ -246,11 +247,15 @@ context_prepare :: proc(state: ^Analysis_Context, root: string) -> bool {
 	return true
 }
 
-context_init :: proc(state: ^Analysis_Context, root: string) -> bool {
+context_init :: proc(state: ^Analysis_Context, root: string, limits := Scan_Limits{}, scan_error: ^Scan_Error = nil) -> bool {
+	if scan_error != nil {scan_error^ = .None}
+	if state == nil {return false}
+	state.scan.limits = limits
 	if !context_prepare(state, root) {
 		return false
 	}
 	if !context_build_index(state) {
+		if scan_error != nil {scan_error^ = state.scan.error}
 		context_destroy(state)
 		return false
 	}
@@ -290,6 +295,7 @@ context_build_candidate :: proc(
 	if !context_allocate_index(candidate) {
 		return false
 	}
+	candidate.scan.limits = state.scan.limits
 	candidate.root = strings.clone(state.root)
 	odin_root_ok: bool
 	candidate.odin_root, odin_root_ok = resolve_odin_root()

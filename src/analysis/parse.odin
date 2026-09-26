@@ -144,8 +144,8 @@ parse_document_into_context :: proc(
 	path: string,
 ) -> bool {
 	arena_allocator := virtual_arena_allocator(state)
-	text, read_error := os.read_entire_file(path, arena_allocator)
-	if read_error != nil {
+	text, read_ok := scan_read_source(state, path, arena_allocator)
+	if !read_ok {
 		return false
 	}
 	append(
@@ -193,44 +193,44 @@ scan_recursive_root :: proc(
 	visited_documents: ^map[string]bool,
 ) -> bool {
 	add_watch_root(state, root)
-	walker := os.walker_create(root)
-	for info in os.walker_walk(&walker) {
-		if info.type == .Directory {
-			if should_exclude(state, info.fullpath) {
-				os.walker_skip_dir(&walker)
+	pending := make([dynamic]string, context.temp_allocator)
+	append(&pending, root)
+	for len(pending) > 0 {
+		directory, open_error := os.open(pop(&pending))
+		if open_error != nil {return scan_fail(state, .Read_Failed)}
+		defer os.close(directory)
+		iterator := os.read_directory_iterator_create(directory)
+		defer os.read_directory_iterator_destroy(&iterator)
+		if _, error := os.read_directory_iterator_error(&iterator); error != nil {
+			return scan_fail(state, .Read_Failed)
+		}
+		for info in os.read_directory_iterator(&iterator) {
+			if _, error := os.read_directory_iterator_error(&iterator); error != nil {
+				return scan_fail(state, .Read_Failed)
 			}
-			continue
-		}
-		if info.type != .Regular {
-			continue
-		}
-		if should_exclude(state, info.fullpath) {
-			continue
-		}
-		path := normalized_path(info.fullpath, context.temp_allocator)
-		if is_document_path(info.name) {
-			if !visited_documents^[path] {
-				visited_documents^[path] = true
-				if !parse_document_into_context(state, path) {
-					os.walker_destroy(&walker)
-					return false
+			if !scan_entry(state) {return false}
+			if should_exclude(state, info.fullpath) {continue}
+			if info.type == .Directory {
+				append(&pending, strings.clone(info.fullpath, context.temp_allocator))
+				continue
+			}
+			if info.type != .Regular {continue}
+			path := normalized_path(info.fullpath, context.temp_allocator)
+			if is_document_path(info.name) {
+				if !state.scan.limits.skip_documents && !visited_documents^[path] {
+					visited_documents^[path] = true
+					if !parse_document_into_context(state, path) {return false}
 				}
+				continue
 			}
-			continue
+			if !strings.has_suffix(info.name, ".odin") || visited_files^[path] {continue}
+			visited_files^[path] = true
+			if !parse_file_into_context(state, path) {return false}
 		}
-		if !strings.has_suffix(info.name, ".odin") {
-			continue
-		}
-		if visited_files^[path] {
-			continue
-		}
-		visited_files^[path] = true
-		if !parse_file_into_context(state, path) {
-			os.walker_destroy(&walker)
-			return false
+		if _, error := os.read_directory_iterator_error(&iterator); error != nil {
+			return scan_fail(state, .Read_Failed)
 		}
 	}
-	os.walker_destroy(&walker)
 	return true
 }
 
@@ -242,15 +242,29 @@ scan_package_directory :: proc(
 	if !os.exists(directory) {
 		return true
 	}
-	entries, read_error := os.read_all_directory_by_path(
-		directory,
-		context.temp_allocator,
-	)
-	if read_error != nil {
-		return false
+	file, open_error := os.open(directory)
+	if open_error != nil {return scan_fail(state, .Read_Failed)}
+	defer os.close(file)
+	iterator := os.read_directory_iterator_create(file)
+	defer os.read_directory_iterator_destroy(&iterator)
+	if _, error := os.read_directory_iterator_error(&iterator); error != nil {
+		return scan_fail(state, .Read_Failed)
+	}
+	entries := make([dynamic]os.File_Info, context.temp_allocator)
+	for info in os.read_directory_iterator(&iterator) {
+		if _, error := os.read_directory_iterator_error(&iterator); error != nil {
+			return scan_fail(state, .Read_Failed)
+		}
+		if !scan_entry(state) {return false}
+		cloned, clone_error := os.file_info_clone(info, context.temp_allocator)
+		if clone_error != nil {return scan_fail(state, .Read_Failed)}
+		append(&entries, cloned)
+	}
+	if _, error := os.read_directory_iterator_error(&iterator); error != nil {
+		return scan_fail(state, .Read_Failed)
 	}
 	slice.sort_by(
-		entries,
+		entries[:],
 		proc(a, b: os.File_Info) -> bool {
 			return strings.compare(a.fullpath, b.fullpath) < 0
 		},
@@ -274,6 +288,7 @@ scan_package_directory :: proc(
 }
 
 scan_and_parse :: proc(state: ^Analysis_Context) -> bool {
+	state.scan = {limits = state.scan.limits}
 	roots := make([dynamic]string, context.temp_allocator)
 	append(&roots, state.root)
 	for collection in state.config.collections {
@@ -347,8 +362,8 @@ parse_builtin_file_into_context :: proc(
 	path: string,
 ) -> bool {
 	arena_allocator := virtual_arena_allocator(state)
-	source_bytes, read_error := os.read_entire_file(path, arena_allocator)
-	if read_error != nil {
+	source_bytes, read_ok := scan_read_source(state, path, arena_allocator)
+	if !read_ok {
 		return false
 	}
 
@@ -464,8 +479,8 @@ parse_file_into_context :: proc(
 	collect_occurrences := true,
 ) -> bool {
 	arena_allocator := virtual_arena_allocator(state)
-	source_bytes, read_error := os.read_entire_file(path, arena_allocator)
-	if read_error != nil {
+	source_bytes, read_ok := scan_read_source(state, path, arena_allocator)
+	if !read_ok {
 		return false
 	}
 
@@ -510,6 +525,12 @@ parse_file_into_context :: proc(
 	// variants of the same declarations) would make every use ambiguous.
 	if !is_builtin && !file_builds_for_host(&record.ast_file, filepath.base(path)) {
 		return true
+	}
+	if path_is_within(state.root, path) {
+		if state.scan.limits.project_files > 0 && state.scan.project_files == state.scan.limits.project_files {
+			return scan_fail(state, .Too_Many_Files)
+		}
+		state.scan.project_files += 1
 	}
 
 	append(&state.files, record)

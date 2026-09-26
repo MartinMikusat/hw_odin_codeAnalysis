@@ -73,8 +73,8 @@ load_config :: proc(
 	path, _ := filepath.join({root, "code-analysis.json"}, allocator)
 	defer delete(path, allocator)
 
-	data, read_error := os.read_entire_file(path, context.temp_allocator)
-	if read_error != nil {
+	data, read_error := read_bounded_file(path, 64 * 1024, context.temp_allocator)
+	if read_error != .None {
 		if !os.exists(path) {
 			digest := config_digest(&config, allocator)
 			return config, digest, true

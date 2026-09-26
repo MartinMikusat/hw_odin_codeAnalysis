@@ -125,6 +125,15 @@ The `status` result includes a digest of the effective configuration.
 
 ### Current analysis boundary
 
+Embedded callers may pass `Scan_Limits` and a `Scan_Error` output pointer to
+`analysis.context_init`. Entry limits cover recursive and imported-package scans;
+project-file limits apply after exclusions and host-target selection. Per-file
+limits cover non-toolchain sources, while the total-byte limit includes toolchain
+reads. Callers that do not need documentation can set `skip_documents`.
+Zero limits preserve the standalone analyzer's scope. Rebuilds retain the limits,
+and directory or source-read failures reject the candidate. Configuration files
+are limited to 64 KB.
+
 The engine parses saved files with the Odin compiler AST packages. It resolves
 package declarations, local declarations, imported package selectors, using
 imports, compiler built-ins, typed struct fields, references, and direct calls.
