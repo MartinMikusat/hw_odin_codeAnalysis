@@ -25,6 +25,14 @@ Analysis_Context :: struct {
 	config:      Config,
 	config_digest: string,
 	arena:       virtual.Arena,
+	project_arena: virtual.Arena,
+	// Toolchain records are a contiguous prefix. Project records follow them and
+	// are replaced by context_rebuild_project.
+	toolchain_files:       int,
+	toolchain_symbols:     int,
+	toolchain_imports:     int,
+	toolchain_occurrences: int,
+	parse_toolchain: bool,
 	files:       [dynamic]File_Record,
 	symbols:     [dynamic]Symbol,
 	occurrences: [dynamic]Occurrence,
@@ -51,6 +59,10 @@ context_allocate_index :: proc(state: ^Analysis_Context) -> bool {
 		return false
 	}
 	if virtual.arena_init_growing(&state.arena) != nil {
+		return false
+	}
+	if virtual.arena_init_growing(&state.project_arena) != nil {
+		virtual.arena_destroy(&state.arena)
 		return false
 	}
 	state.files = make([dynamic]File_Record)
@@ -107,8 +119,28 @@ append_file_index_value :: proc(
 	index^[key] = values
 }
 
-context_build_declaration_indexes :: proc(state: ^Analysis_Context) {
-	allocator := virtual_arena_allocator(state)
+context_base_allocator :: proc(state: ^Analysis_Context) -> runtime.Allocator {
+	return virtual.arena_allocator(&state.arena)
+}
+
+context_project_allocator :: proc(state: ^Analysis_Context) -> runtime.Allocator {
+	return virtual.arena_allocator(&state.project_arena)
+}
+
+// Map tables stay in the base arena. A list's backing arena is chosen by the
+// first record appended to it: toolchain lists outlive a project reset.
+context_list_allocator :: proc(state: ^Analysis_Context, toolchain: bool) -> runtime.Allocator {
+	if toolchain {
+		return context_base_allocator(state)
+	}
+	return context_project_allocator(state)
+}
+
+context_ensure_declaration_maps :: proc(state: ^Analysis_Context) {
+	if state.files_by_path != nil {
+		return
+	}
+	allocator := context_base_allocator(state)
 	state.files_by_path = make(map[string]File_ID, allocator = allocator)
 	state.files_by_package = make(map[string][dynamic]File_ID, allocator = allocator)
 	state.symbols_by_name = make(Symbol_Name_Index, allocator = allocator)
@@ -117,16 +149,24 @@ context_build_declaration_indexes :: proc(state: ^Analysis_Context) {
 	state.symbols_by_owner_type = make(map[string][dynamic]Symbol_ID, allocator = allocator)
 	state.symbols_by_kind = make(map[Symbol_Kind][dynamic]Symbol_ID, allocator = allocator)
 	state.imports_by_path = make(map[string][dynamic]int, allocator = allocator)
-	for file in state.files {
+}
+
+context_index_range :: proc(
+	state: ^Analysis_Context,
+	file_from, symbol_from, import_from: int,
+) {
+	assert(file_from >= 0 && file_from <= len(state.files))
+	assert(symbol_from >= 0 && symbol_from <= len(state.symbols))
+	assert(import_from >= 0 && import_from <= len(state.imports))
+	for file in state.files[file_from:] {
+		toolchain := int(file.id) < state.toolchain_files
+		allocator := context_list_allocator(state, toolchain)
 		state.files_by_path[file.relative_path] = file.id
-		append_file_index_value(
-			&state.files_by_package,
-			file.package_directory,
-			file.id,
-			allocator,
-		)
+		append_file_index_value(&state.files_by_package, file.package_directory, file.id, allocator)
 	}
-	for symbol in state.symbols {
+	for symbol in state.symbols[symbol_from:] {
+		toolchain := int(symbol.id) < state.toolchain_symbols
+		allocator := context_list_allocator(state, toolchain)
 		append_symbol_index_value(string, &state.symbols_by_name, symbol.name, symbol.id, allocator)
 		append_symbol_index_value(string, &state.symbols_by_path, symbol.path, symbol.id, allocator)
 		append_symbol_index_value(
@@ -145,27 +185,17 @@ context_build_declaration_indexes :: proc(state: ^Analysis_Context) {
 				allocator,
 			)
 		}
-		append_symbol_index_value(
-			Symbol_Kind,
-			&state.symbols_by_kind,
-			symbol.kind,
-			symbol.id,
-			allocator,
-		)
+		append_symbol_index_value(Symbol_Kind, &state.symbols_by_kind, symbol.kind, symbol.id, allocator)
 	}
-	for _, import_index in state.imports {
-		append_index_value(
-			string,
-			&state.imports_by_path,
-			state.imports[import_index].path,
-			import_index,
-			allocator,
-		)
+	for import_index in import_from ..< len(state.imports) {
+		imported := state.imports[import_index]
+		allocator := context_list_allocator(state, import_index < state.toolchain_imports)
+		append_index_value(string, &state.imports_by_path, imported.path, import_index, allocator)
 	}
 }
 
 context_build_occurrence_path_index :: proc(state: ^Analysis_Context) {
-	allocator := virtual_arena_allocator(state)
+	allocator := context_project_allocator(state)
 	state.occurrences_by_path = make(map[string][dynamic]int, allocator = allocator)
 	for occurrence, occurrence_index in state.occurrences {
 		append_index_value(
@@ -179,7 +209,7 @@ context_build_occurrence_path_index :: proc(state: ^Analysis_Context) {
 }
 
 context_build_occurrence_symbol_index :: proc(state: ^Analysis_Context) {
-	allocator := virtual_arena_allocator(state)
+	allocator := context_project_allocator(state)
 	state.occurrences_by_symbol = make(map[Symbol_ID][dynamic]int, allocator = allocator)
 	for occurrence, occurrence_index in state.occurrences {
 		if int(occurrence.symbol) < 0 {
@@ -214,17 +244,27 @@ resolve_odin_root :: proc(allocator := context.allocator) -> (string, bool) {
 	return resolved, true
 }
 
+context_finish_index :: proc(
+	state: ^Analysis_Context,
+	file_from, symbol_from, import_from, resolve_from: int,
+) -> bool {
+	context_partition_layers(state)
+	context_ensure_declaration_maps(state)
+	context_index_range(state, file_from, symbol_from, import_from)
+	context_build_occurrence_path_index(state)
+	if !resolve_occurrences(state, resolve_from) {
+		return false
+	}
+	context_build_occurrence_symbol_index(state)
+	context_assert_layers(state)
+	return true
+}
+
 context_build_index :: proc(state: ^Analysis_Context) -> bool {
 	if !scan_and_parse(state) {
 		return false
 	}
-	context_build_declaration_indexes(state)
-	context_build_occurrence_path_index(state)
-	if !resolve_occurrences(state) {
-		return false
-	}
-	context_build_occurrence_symbol_index(state)
-	return true
+	return context_finish_index(state, 0, 0, 0, 0)
 }
 
 context_prepare :: proc(state: ^Analysis_Context, root: string) -> bool {
@@ -281,6 +321,7 @@ context_destroy :: proc(state: ^Analysis_Context) {
 	}
 	delete(state.watch_roots)
 	virtual.arena_destroy(&state.arena)
+	virtual.arena_destroy(&state.project_arena)
 	state^ = {}
 }
 

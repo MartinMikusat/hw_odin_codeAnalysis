@@ -9,8 +9,10 @@ Scan_Limits :: struct {
 	entries:       int,
 	project_files: int,
 	file_bytes:    i64, // Non-toolchain sources; the installed toolchain is trusted.
+	dependency_file_bytes: i64, // Optional separate bound outside the project root.
 	total_bytes:   i64,
 	skip_documents: bool,
+	skip_collection_roots: bool, // Still resolve and follow imports from these collections.
 }
 
 Scan_Error :: enum {
@@ -73,6 +75,9 @@ read_bounded_file :: proc(path: string, limit: i64, allocator: runtime.Allocator
 
 scan_read_source :: proc(state: ^Analysis_Context, path: string, allocator: runtime.Allocator) -> ([]byte, bool) {
 	limit := state.scan.limits.file_bytes
+	if !path_is_within(state.root, path) && state.scan.limits.dependency_file_bytes > 0 {
+		limit = state.scan.limits.dependency_file_bytes
+	}
 	if limit == 0 || path_is_within(state.odin_root, path) {limit = -1}
 	remaining := state.scan.limits.total_bytes - state.scan.bytes
 	if state.scan.limits.total_bytes > 0 {

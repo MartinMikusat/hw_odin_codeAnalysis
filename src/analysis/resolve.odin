@@ -409,9 +409,12 @@ resolve_field_selector :: proc(
 	return Symbol_ID(-1)
 }
 
-resolve_occurrences :: proc(state: ^Analysis_Context) -> bool {
-	for &occurrence in state.occurrences {
-		occurrence.symbol = resolve_occurrence(
+resolve_occurrences :: proc(state: ^Analysis_Context, start := 0) -> bool {
+	assert(state != nil)
+	assert(start >= 0 && start <= len(state.occurrences))
+	for index in start ..< len(state.occurrences) {
+		occurrence := state.occurrences[index]
+		state.occurrences[index].symbol = resolve_occurrence(
 			state,
 			occurrence,
 			state.symbols_by_name[occurrence.name][:],

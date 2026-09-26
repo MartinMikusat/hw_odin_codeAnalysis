@@ -1,6 +1,7 @@
 package tests
 
 import "core:os"
+import "core:encoding/json"
 import "core:path/filepath"
 import "core:strings"
 import "core:testing"
@@ -74,4 +75,35 @@ bounded_file_read_checks_empty_exact_and_oversized_files :: proc(t: ^testing.T) 
 	empty, error := analysis.read_bounded_file(main_path, 0, context.allocator)
 	defer delete(empty)
 	testing.expect_value(t, error, analysis.Scan_Error.None)
+}
+
+@(test)
+collection_discovery_can_be_separate_from_imported_dependency_analysis :: proc(t: ^testing.T) {
+	root, main_path, stable_path, ok := temporary_workspace(t)
+	if !ok {return}
+	defer destroy_temporary_workspace(root, main_path, stable_path)
+	library, library_path, library_stable, library_ok := temporary_workspace(t)
+	if !library_ok {return}
+	defer destroy_temporary_workspace(library, library_path, library_stable)
+	testing.expect(t, os.write_entire_file(main_path, "package demo\n") == nil)
+	testing.expect(t, os.write_entire_file(stable_path, "package demo\n") == nil)
+	large_source := strings.concatenate({"package available\nanswer :: 42\n//", strings.repeat("x", 1024, context.temp_allocator)}, context.temp_allocator)
+	testing.expect(t, os.write_entire_file(library_path, large_source) == nil)
+	testing.expect(t, os.write_entire_file(library_stable, "package available\n") == nil)
+	collections := [?]analysis.Collection_Config{{name = "available", path = library}}
+	config, marshal_error := json.marshal(analysis.Config{collections = collections[:]}, allocator = context.temp_allocator)
+	testing.expect(t, marshal_error == nil)
+	config_path, _ := filepath.join({root, "code-analysis.json"}, context.temp_allocator)
+	testing.expect(t, os.write_entire_file(config_path, config) == nil)
+	limits := analysis.Scan_Limits{file_bytes = 64, dependency_file_bytes = 2048, skip_collection_roots = true}
+	state: analysis.Analysis_Context
+	defer analysis.context_destroy(&state)
+	testing.expect(t, analysis.context_init(&state, root, limits))
+	for file in state.files {testing.expect(t, file.package_name != "available")}
+	analysis.context_destroy(&state)
+	testing.expect(t, os.write_entire_file(main_path, "package demo\nimport \"available:.\"\nvalue :: available.answer\n") == nil)
+	testing.expect(t, analysis.context_init(&state, root, limits))
+	found := false
+	for file in state.files {if file.package_name == "available" {found = true}}
+	testing.expect(t, found)
 }

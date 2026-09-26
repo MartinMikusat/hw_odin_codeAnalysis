@@ -1,6 +1,6 @@
 # Incremental project rebuild (planned)
 
-Status: approved by the operator on 2026-09-26, not yet implemented. Consumer:
+Status: implemented. Approved by the operator on 2026-09-26. Consumer:
 hw_harness, which indexes the opened project in-process on a worker thread.
 
 ## Problem

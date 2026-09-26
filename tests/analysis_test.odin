@@ -1,5 +1,6 @@
 package tests
 
+import "core:fmt"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
@@ -1259,4 +1260,206 @@ file_name_suffixes_select_the_target :: proc(t: ^testing.T) {
 		builds := analysis.file_name_builds_for(entry.name, .Darwin, .arm64)
 		testing.expectf(t, builds == entry.builds, "%s: expected %v", entry.name, entry.builds)
 	}
+}
+
+context_catalog :: proc(
+	state: ^analysis.Analysis_Context,
+	project_only: bool,
+) -> map[string]int {
+	counts := make(map[string]int, context.temp_allocator)
+	for file in state.files {
+		if project_only && analysis.path_is_within(state.odin_root, file.path) {
+			continue
+		}
+		key := fmt.tprintf("file\t%s\t%s", file.relative_path, file.package_name)
+		counts[key] += 1
+	}
+	for symbol in state.symbols {
+		if project_only && analysis.path_is_within(state.odin_root, symbol.path) {
+			continue
+		}
+		key := fmt.tprintf("symbol\t%v\t%s\t%s", symbol.kind, symbol.name, symbol.path)
+		counts[key] += 1
+	}
+	for imported in state.imports {
+		if project_only && analysis.path_is_within(state.odin_root, imported.path) {
+			continue
+		}
+		key := fmt.tprintf(
+			"import\t%s\t%s\t%s\t%s\t%v",
+			imported.path,
+			imported.import_path,
+			imported.alias,
+			imported.resolved_path,
+			imported.is_using,
+		)
+		counts[key] += 1
+	}
+	for occurrence in state.occurrences {
+		if project_only && analysis.path_is_within(state.odin_root, occurrence.path) {
+			continue
+		}
+		symbol_name, symbol_path := "", ""
+		if int(occurrence.symbol) >= 0 {
+			symbol := state.symbols[int(occurrence.symbol)]
+			symbol_name = symbol.name
+			symbol_path = symbol.path
+		}
+		key := fmt.tprintf(
+			"use\t%s\t%s\t%s\t%s",
+			occurrence.name,
+			occurrence.path,
+			symbol_name,
+			symbol_path,
+		)
+		counts[key] += 1
+	}
+	return counts
+}
+
+expect_same_catalog :: proc(t: ^testing.T, left, right: map[string]int) {
+	testing.expect_value(t, len(left), len(right))
+	for key, count in left {
+		testing.expectf(t, right[key] == count, "%s: expected %d, got %d", key, count, right[key])
+	}
+}
+
+builtin_len_id :: proc(state: ^analysis.Analysis_Context) -> analysis.Symbol_ID {
+	for symbol in state.symbols {
+		if symbol.name == "len" && strings.contains(symbol.path, "builtin") {
+			return symbol.id
+		}
+	}
+	return -1
+}
+
+@(test)
+project_rebuild_matches_a_full_index_without_growing_the_toolchain_arena :: proc(
+	t: ^testing.T,
+) {
+	root, root_error := os.get_absolute_path("tests/fixtures/workspace", context.temp_allocator)
+	testing.expect_value(t, root_error, nil)
+	if root_error != nil {
+		return
+	}
+
+	state, ok := fixture_context()
+	testing.expect(t, ok)
+	if !ok {
+		return
+	}
+	defer analysis.context_destroy(&state)
+	len_id := builtin_len_id(&state)
+	testing.expect(t, int(len_id) >= 0)
+	testing.expect(t, state.toolchain_files > 0)
+	testing.expect(t, state.toolchain_files < len(state.files))
+
+	testing.expect(t, analysis.context_rebuild_project(&state, root))
+	base_used := state.arena.total_used
+	testing.expect(t, base_used > 0)
+	testing.expect_value(t, builtin_len_id(&state), len_id)
+	testing.expect_value(t, state.generation, u64(2))
+
+	fresh, fresh_ok := fixture_context()
+	testing.expect(t, fresh_ok)
+	if !fresh_ok {
+		return
+	}
+	defer analysis.context_destroy(&fresh)
+	expect_same_catalog(t, context_catalog(&state, false), context_catalog(&fresh, false))
+
+	testing.expect(t, analysis.context_rebuild_project(&state, root))
+	testing.expect_value(t, state.arena.total_used, base_used)
+	testing.expect(t, analysis.context_rebuild_project(&state, root))
+	testing.expect_value(t, state.arena.total_used, base_used)
+	testing.expect_value(t, builtin_len_id(&state), len_id)
+	testing.expect_value(t, state.generation, u64(4))
+}
+
+@(test)
+project_rebuild_loads_a_new_toolchain_package_and_can_switch_roots :: proc(t: ^testing.T) {
+	made, made_error := os.make_directory_temp("", "hw-odin-rebuild-*", context.allocator)
+	testing.expect_value(t, made_error, nil)
+	if made_error != nil {
+		return
+	}
+	defer {
+		_ = os.remove_all(made)
+		delete(made)
+	}
+	other_made, other_error := os.make_directory_temp("", "hw-odin-rebuild-other-*", context.allocator)
+	testing.expect_value(t, other_error, nil)
+	if other_error != nil {
+		return
+	}
+	defer {
+		_ = os.remove_all(other_made)
+		delete(other_made)
+	}
+	// The analyzer compares normalized file paths against the root. Temp
+	// directories on macOS sit behind the /var -> /private/var symlink.
+	root, root_error := os.get_absolute_path(made, context.allocator)
+	testing.expect_value(t, root_error, nil)
+	if root_error != nil {
+		return
+	}
+	defer delete(root)
+	other, other_path_error := os.get_absolute_path(other_made, context.allocator)
+	testing.expect_value(t, other_path_error, nil)
+	if other_path_error != nil {
+		return
+	}
+	defer delete(other)
+
+	main_path, _ := filepath.join({root, "main.odin"}, context.allocator)
+	defer delete(main_path)
+	other_path, _ := filepath.join({other, "main.odin"}, context.allocator)
+	defer delete(other_path)
+	plain := transmute([]byte)string("package demo\n\nvalue :: 1\n")
+	imported := transmute([]byte)string("package demo\n\nimport \"core:fmt\"\n\nvalue :: proc() {\n\tfmt.println(value)\n}\n")
+	other_source := transmute([]byte)string("package other\n\nname :: \"other\"\n")
+	testing.expect(t, os.write_entire_file(main_path, plain) == nil)
+	testing.expect(t, os.write_entire_file(other_path, other_source) == nil)
+
+	state: analysis.Analysis_Context
+	testing.expect(t, analysis.context_init(&state, root))
+	if !state.initialized {
+		return
+	}
+	defer analysis.context_destroy(&state)
+	toolchain_files := state.toolchain_files
+
+	testing.expect(t, os.write_entire_file(main_path, imported) == nil)
+	testing.expect(t, analysis.context_rebuild_project(&state, root))
+	testing.expect(t, state.toolchain_files > toolchain_files)
+	loaded_files := state.toolchain_files
+	with_import, with_ok := fixture_context_at(root)
+	testing.expect(t, with_ok)
+	if !with_ok {
+		return
+	}
+	defer analysis.context_destroy(&with_import)
+	expect_same_catalog(t, context_catalog(&state, false), context_catalog(&with_import, false))
+
+	testing.expect(t, os.write_entire_file(main_path, plain) == nil)
+	testing.expect(t, analysis.context_rebuild_project(&state, root))
+	testing.expect_value(t, state.toolchain_files, loaded_files)
+	without_import, without_ok := fixture_context_at(root)
+	testing.expect(t, without_ok)
+	if !without_ok {
+		return
+	}
+	defer analysis.context_destroy(&without_import)
+	expect_same_catalog(t, context_catalog(&state, true), context_catalog(&without_import, true))
+	testing.expect(t, state.toolchain_files > without_import.toolchain_files)
+
+	testing.expect(t, analysis.context_rebuild_project(&state, other))
+	switched, switched_ok := fixture_context_at(other)
+	testing.expect(t, switched_ok)
+	if !switched_ok {
+		return
+	}
+	defer analysis.context_destroy(&switched)
+	expect_same_catalog(t, context_catalog(&state, true), context_catalog(&switched, true))
+	testing.expect(t, state.toolchain_files >= loaded_files)
 }

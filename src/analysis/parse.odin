@@ -143,6 +143,8 @@ parse_document_into_context :: proc(
 	state: ^Analysis_Context,
 	path: string,
 ) -> bool {
+	state.parse_toolchain = path_is_within(state.odin_root, path)
+	defer state.parse_toolchain = false
 	arena_allocator := virtual_arena_allocator(state)
 	text, read_ok := scan_read_source(state, path, arena_allocator)
 	if !read_ok {
@@ -287,18 +289,26 @@ scan_package_directory :: proc(
 	return true
 }
 
-scan_and_parse :: proc(state: ^Analysis_Context) -> bool {
+scan_and_parse :: proc(state: ^Analysis_Context, reuse_toolchain := false) -> bool {
 	state.scan = {limits = state.scan.limits}
+	if reuse_toolchain {
+		assert(state.toolchain_files > 0)
+		context_drop_project_watch_roots(state)
+	}
 	roots := make([dynamic]string, context.temp_allocator)
 	append(&roots, state.root)
 	for collection in state.config.collections {
+		if state.scan.limits.skip_collection_roots {continue}
 		path := collection.path
 		if !filepath.is_abs(path) {
 			path, _ = filepath.join({state.root, path}, context.temp_allocator)
 		}
 		append(&roots, path)
 	}
-	if state.config.index_odin_collections {
+	// A project rebuild already holds every toolchain package loaded so far.
+	// New imports are still followed below; walking base/core/vendor again is
+	// the cost this path exists to skip.
+	if state.config.index_odin_collections && !reuse_toolchain {
 		collection_names := [3]string{"base", "core", "vendor"}
 		for collection_name in collection_names {
 			path, _ := filepath.join(
@@ -311,16 +321,22 @@ scan_and_parse :: proc(state: ^Analysis_Context) -> bool {
 
 	visited_files := make(map[string]bool, context.temp_allocator)
 	visited_documents := make(map[string]bool, context.temp_allocator)
-	builtin_path, _ := filepath.join(
-		{state.odin_root, "base", "builtin", "builtin.odin"},
-		context.temp_allocator,
-	)
-	builtin_path = normalized_path(builtin_path, context.temp_allocator)
-	if !parse_builtin_file_into_context(state, builtin_path) {
-		return false
+	if reuse_toolchain {
+		for file in state.files {
+			visited_files[file.path] = true
+		}
+	} else {
+		builtin_path, _ := filepath.join(
+			{state.odin_root, "base", "builtin", "builtin.odin"},
+			context.temp_allocator,
+		)
+		builtin_path = normalized_path(builtin_path, context.temp_allocator)
+		if !parse_builtin_file_into_context(state, builtin_path) {
+			return false
+		}
+		visited_files[builtin_path] = true
+		add_watch_root(state, filepath.dir(builtin_path))
 	}
-	visited_files[builtin_path] = true
-	add_watch_root(state, filepath.dir(builtin_path))
 
 	for root in roots {
 		if !scan_recursive_root(state, root, &visited_files, &visited_documents) {
@@ -329,6 +345,12 @@ scan_and_parse :: proc(state: ^Analysis_Context) -> bool {
 	}
 
 	visited_packages := make(map[string]bool, context.temp_allocator)
+	if reuse_toolchain {
+		for file in state.files[:state.toolchain_files] {
+			directory := normalized_path(filepath.dir(file.path), context.temp_allocator)
+			visited_packages[directory] = true
+		}
+	}
 	for import_index := 0; import_index < len(state.imports); import_index += 1 {
 		import_value := state.imports[import_index]
 		if !filepath.is_abs(import_value.resolved_path) {
@@ -361,6 +383,8 @@ parse_builtin_file_into_context :: proc(
 	state: ^Analysis_Context,
 	path: string,
 ) -> bool {
+	state.parse_toolchain = true
+	defer state.parse_toolchain = false
 	arena_allocator := virtual_arena_allocator(state)
 	source_bytes, read_ok := scan_read_source(state, path, arena_allocator)
 	if !read_ok {
@@ -478,6 +502,8 @@ parse_file_into_context :: proc(
 	collect_import_declarations := true,
 	collect_occurrences := true,
 ) -> bool {
+	state.parse_toolchain = path_is_within(state.odin_root, path)
+	defer state.parse_toolchain = false
 	arena_allocator := virtual_arena_allocator(state)
 	source_bytes, read_ok := scan_read_source(state, path, arena_allocator)
 	if !read_ok {
@@ -545,7 +571,11 @@ parse_file_into_context :: proc(
 }
 
 virtual_arena_allocator :: proc(state: ^Analysis_Context) -> runtime.Allocator {
-	return virtual.arena_allocator(&state.arena)
+	assert(state != nil)
+	if state.parse_toolchain {
+		return virtual.arena_allocator(&state.arena)
+	}
+	return virtual.arena_allocator(&state.project_arena)
 }
 
 symbol_kind_from_value :: proc(decl: ^ast.Value_Decl, index: int) -> Symbol_Kind {

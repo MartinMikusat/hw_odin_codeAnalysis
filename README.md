@@ -130,6 +130,9 @@ Embedded callers may pass `Scan_Limits` and a `Scan_Error` output pointer to
 project-file limits apply after exclusions and host-target selection. Per-file
 limits cover non-toolchain sources, while the total-byte limit includes toolchain
 reads. Callers that do not need documentation can set `skip_documents`.
+`skip_collection_roots` avoids scanning unused configured collections while still
+resolving and following their imports. `dependency_file_bytes` optionally gives
+non-project sources a separate per-file bound; zero retains `file_bytes`.
 Zero limits preserve the standalone analyzer's scope. Rebuilds retain the limits,
 and directory or source-read failures reject the candidate. Configuration files
 are limited to 64 KB.
