@@ -2,19 +2,13 @@
 
 An agent-first Odin code-analysis engine with a persistent semantic daemon.
 
-## AI-assisted development disclosure
-
-Models used:
-
-- **GPT-5.6-Sol**
-
 The project analyzes saved Odin source files for terminal agents and exposes capability auditing through both its CLI and an MCP stdio server. It does not implement an editor language server.
 
 ## Status
 
 The implementation targets macOS on Apple Silicon and the active monthly compiler managed by `hw-odin`.
 
-See [`TODO.md`](TODO.md) for the completed analysis-engine roadmap and explicitly deferred scope.
+See [`TODO.md`](TODO.md) for outstanding work and excluded scope.
 
 ## Build
 
@@ -162,24 +156,9 @@ polymorphic specialization, implicit selectors, overloads, and inferred
 expressions can return `Ambiguous` or `Unresolved`. Run `diagnostics` or
 `hw-odin check` for compiler authority.
 
-## Performance
+## Performance checks
 
-Run `./benchmark.sh` to measure the local fixture. On an Apple Silicon
-development machine, version `0.5.0` measured on 2026-08-13 with MCP usage recording active:
-
-- Warm definition query: 2.8 ms mean across 100 runs.
-- Cold daemon startup and initial index: 21.2 ms mean across 10 runs.
-- Cold capability-catalog construction: 690.25 ms.
-- Warm indexed and recorded capability audit: 14.46 ms median across 29 warm runs.
-- Equivalent fresh `rg` scan of Odin `core`: 22.00 ms median across 30 runs.
-- Warm MCP speedup over the regular source scan: 1.52× median.
-- MCP tool catalog: 3,794 bytes.
-- Compact 40-match capability audit: 8,249 bytes.
-- Compact two-query symbol lookup: 982 bytes.
-- Usage database after the benchmark session: 196,608 bytes across 34 events.
-
-The values include process startup, socket transport, JSON encoding, and
-FSEvents synchronization.
+`./benchmark.sh` is an opt-in local benchmark; normal gates do not run it.
 
 ## Reference implementation
 

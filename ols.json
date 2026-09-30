@@ -1,0 +1,18 @@
+{
+  "collections": [
+    {
+      "name": "code_analysis",
+      "path": "src"
+    }
+  ],
+  "profile": "default",
+  "profiles": [
+    {
+      "name": "default",
+      "checker_path": [
+        "cmd/hw-odin-analyze",
+        "tests"
+      ]
+    }
+  ]
+}
