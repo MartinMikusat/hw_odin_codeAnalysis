@@ -33,11 +33,15 @@ read_standard_input :: proc(maximum: int) -> (string, bool) {
 daemon_query :: proc(root, command, argument: string) -> (string, bool) {
 	paths, paths_ok := transport.runtime_paths(root, context.temp_allocator)
 	if !paths_ok || !ensure_daemon(root, paths) {
+		track_daemon_failure()
 		return "", false
 	}
 	response, contacted := send_request(
 		paths.socket_path, command, {argument}, true, context.temp_allocator,
 	)
+	if !contacted {
+		track_daemon_failure()
+	}
 	return response.payload, contacted && response.ok
 }
 
@@ -55,17 +59,25 @@ option_value :: proc(arguments: []string, index: ^int) -> string {
 
 finish :: proc(text: string, ok: bool) {
 	fmt.println(strings.trim_right_space(text))
+	tracked.event.output_bytes = len(text)
+	track_finish()
 	if !ok {
 		os.exit(1)
 	}
 }
 
-perform_check :: proc(options: workflow.Check_Options) -> bool {
+perform_check :: proc(options: workflow.Check_Options, via := "") -> bool {
+	if !tracked.active {
+		track_start("check", options.root, via)
+	}
 	report := workflow.check(options)
 	if !report.passed && report.error == "" {
 		workflow.add_hints(daemon_query, &report)
 	}
-	fmt.println(strings.trim_right_space(workflow.format_check(report, options.shown)))
+	text := strings.trim_right_space(workflow.format_check(report, options.shown))
+	fmt.println(text)
+	track_check_report(report, text)
+	track_finish()
 	return report.passed
 }
 
@@ -110,13 +122,16 @@ run_edit :: proc(root: string, explicit: bool, arguments: []string) {
 	}
 	edits, parse_error := workflow.parse_edits(source)
 	if parse_error != "" {
+		tracked.event.outcome, tracked.event.reason = "rejected", "bad-input"
 		fail(parse_error)
 	}
+	tracked.event.hunks = len(edits)
 	report := workflow.plan_edits(root, edits)
 	if explicit {
 		prefix := strings.concatenate({root, "/"}, context.temp_allocator)
 		for file in report.files {
 			if !strings.has_prefix(file.path, prefix) {
+				tracked.event.outcome, tracked.event.reason = "rejected", "outside-root"
 				fail(fmt.tprintf("%s is outside --root; nothing was written", file.path))
 			}
 		}
@@ -125,13 +140,17 @@ run_edit :: proc(root: string, explicit: bool, arguments: []string) {
 		for error in report.errors {
 			fmt.eprintln(error)
 		}
+		tracked.event.outcome, tracked.event.reason = "rejected", report.rejection
+		tracked.event.detail = report.errors[0]
 		fail(fmt.tprintf(
 			"%d of %d edits did not apply; nothing was written", len(report.errors), len(edits),
 		))
 	}
 	if write_error := workflow.commit_edits(report); write_error != "" {
+		tracked.event.reason = "write"
 		fail(write_error)
 	}
+	tracked.event.results = len(report.files)
 	projects := make([dynamic]string, context.temp_allocator)
 	for file in report.files {
 		fmt.printfln(
@@ -146,6 +165,7 @@ run_edit :: proc(root: string, explicit: bool, arguments: []string) {
 			append(&projects, project)
 		}
 	}
+	track_finish()
 	if skip_check {
 		return
 	}
@@ -157,7 +177,7 @@ run_edit :: proc(root: string, explicit: bool, arguments: []string) {
 		if len(projects) > 1 {
 			fmt.printfln("project %s", project)
 		}
-		passed = perform_check({root = project, names = names[:]}) && passed
+		passed = perform_check({root = project, names = names[:]}, "edit") && passed
 	}
 	if !passed {
 		fmt.println("the edits were written; fix the check errors with further edits")
@@ -170,9 +190,16 @@ run_guard :: proc() {
 	if !read {
 		return
 	}
-	if reason := workflow.guard_hook(source); reason != "" {
-		fmt.eprintln(reason)
+	verdict := workflow.guard_hook(source)
+	if verdict.block_reason != "" {
+		record_shell_event(verdict, "guard", "blocked", verdict.block_kind, "", verdict.directory)
+		fmt.eprintln(verdict.block_reason)
 		os.exit(HOOK_BLOCK_EXIT_CODE)
+	}
+	for observation in verdict.observations {
+		record_shell_event(
+			verdict, "shell", "observed", observation.kind, observation.detail, observation.directory,
+		)
 	}
 }
 
@@ -190,12 +217,25 @@ run_crash :: proc(root: string, explicit: bool, arguments: []string) {
 			fail("crash options are --app NAME, --report FILE and --devlog DIRECTORY")
 		}
 	}
-	finish(workflow.crash(options))
+	text, found := workflow.crash(options)
+	if !found {
+		tracked.event.outcome = text == workflow.NO_REPORT ? "not-found" : "error"
+		tracked.event.detail = text
+	} else if strings.contains(text, workflow.SYMBOLS_MATCHED) {
+		tracked.event.reason = "symbolized"
+	} else {
+		tracked.event.reason = "no-symbols"
+	}
+	finish(text, found)
 }
 
 run_show :: proc(root: string, explicit: bool, arguments: []string) {
 	if len(arguments) != 1 {
 		fail("usage: show NAME or show PACKAGE.NAME")
 	}
-	finish(workflow.show(daemon_query, project_root(root, explicit), arguments[0]))
+	text, found := workflow.show(daemon_query, project_root(root, explicit), arguments[0])
+	if !found && tracked.event.outcome == "" {
+		tracked.event.outcome, tracked.event.detail = "not-found", arguments[0]
+	}
+	finish(text, found)
 }

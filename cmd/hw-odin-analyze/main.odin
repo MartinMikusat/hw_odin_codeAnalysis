@@ -28,6 +28,8 @@ Workflow commands (text output; the project root is the nearest repository):
   show NAME
   crash [--app NAME] [--report FILE] [--devlog DIRECTORY]
   guard < HOOK.json
+  note TEXT            record what the tool did not handle
+  usage report [--days N]
 
 Edit hunks are '@@ FILE' (optionally ' count=N') followed by '<<<<',
 old lines, '====', new lines and '>>>>'.
@@ -65,6 +67,7 @@ rows (line, kind, name, detail) instead of JSON. Kind names are short
 }
 
 fail :: proc(message: string) -> ! {
+	track_failure(message)
 	fmt.eprintln("hw-odin-analyze:", message)
 	os.exit(1)
 }
@@ -205,9 +208,23 @@ run_usage_report :: proc(
 	arguments: []string,
 ) {
 	if len(arguments) < 2 {
-		fail("usage requires status, summary, or recent")
+		fail("usage requires report, status, summary, or recent")
 	}
 	command := arguments[1]
+	if command == "report" {
+		days := 30
+		if len(arguments) == 4 && arguments[2] == "--days" {
+			days = parse_positive_option("--days", arguments[3], 36500)
+		} else if len(arguments) != 2 {
+			fail("usage report accepts only --days N")
+		}
+		text, ok := usage.effectiveness_report(days, root if root_explicit else "")
+		if !ok {
+			fail("failed to read the usage database")
+		}
+		fmt.print(text)
+		return
+	}
 	if command == "status" {
 		if len(arguments) != 2 {
 			fail("usage status accepts no report options")
@@ -1792,11 +1809,20 @@ run_client :: proc(
 	if !response.ok {
 		fail(response.error)
 	}
+	tracked.event.output_bytes = len(response.payload)
 	if tsv && symbol_list_command(command) {
 		write_payload_symbols_tsv(response.payload)
 		return
 	}
 	fmt.println(response.payload)
+}
+
+tracked_command :: proc(command: string) -> bool {
+	switch command {
+	case "usage", "note", "guard", "stop", "restart", "status", "mcp", "capability-audit":
+		return false
+	}
+	return true
 }
 
 main :: proc() {
@@ -1829,7 +1855,14 @@ main :: proc() {
 		run_mcp(root)
 		return
 	}
+	if tracked_command(arguments[0]) {
+		track_start(arguments[0], project_root(root, root_explicit))
+	}
+	defer track_finish()
 	switch arguments[0] {
+	case "note":
+		run_note(root, root_explicit, arguments[1:])
+		return
 	case "check":
 		run_check(root, root_explicit, arguments[1:])
 		return

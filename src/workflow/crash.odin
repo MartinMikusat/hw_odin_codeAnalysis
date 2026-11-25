@@ -13,6 +13,8 @@ SYMBOL_SEARCH_DEPTH :: 6
 REPORT_SCAN_MAX :: 200
 FRAMES_SHOWN :: 40
 JOURNAL_LINES :: 15
+SYMBOLS_MATCHED :: "symbols: exact build match"
+NO_REPORT :: "crash: no matching report in ~/Library/Logs/DiagnosticReports; pass --app or --report"
 FATAL_WINDOW_MS :: 120 * 1000
 
 Crash_Options :: struct {
@@ -323,7 +325,7 @@ write_archived_log :: proc(builder: ^strings.Builder, dwarf: string) {
 crash :: proc(options: Crash_Options) -> (text: string, ok: bool) {
 	path, found := find_report(options)
 	if !found {
-		return "crash: no matching report in ~/Library/Logs/DiagnosticReports; pass --app or --report", false
+		return NO_REPORT, false
 	}
 	source, read := read_text(path)
 	if !read {
@@ -377,7 +379,7 @@ crash :: proc(options: Crash_Options) -> (text: string, ok: bool) {
 		}
 	}
 	if dwarf_used != "" {
-		fmt.sbprintfln(&builder, "symbols: exact build match %s", dwarf_used)
+		fmt.sbprintfln(&builder, "%s %s", SYMBOLS_MATCHED, dwarf_used)
 	} else {
 		fmt.sbprintfln(
 			&builder,

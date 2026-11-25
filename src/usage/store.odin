@@ -9,7 +9,7 @@ import "core:strings"
 import "core:sys/posix"
 import "core:time"
 
-SCHEMA_VERSION         :: 1
+SCHEMA_VERSION         :: 2
 APPLICATION_ID         :: 0x48574f44
 PAYLOAD_RETENTION_DAYS :: 90
 RETENTION_INTERVAL     :: 24 * time.Hour
@@ -229,11 +229,32 @@ initialize_schema :: proc(database: ^SQLite_DB) -> bool {
 		)
 		if !created ||
 		   !sqlite_execute(database, fmt.aprintf("PRAGMA application_id=%d", APPLICATION_ID, allocator = context.temp_allocator)) ||
-		   !sqlite_execute(database, fmt.aprintf("PRAGMA user_version=%d", SCHEMA_VERSION, allocator = context.temp_allocator)) ||
+		   !sqlite_execute(database, "PRAGMA user_version=1") ||
 		   !sqlite_execute(database, "COMMIT") {
 			_ = sqlite_execute(database, "ROLLBACK")
 			return false
 		}
+	}
+	if version < 2 && !add_command_events(database) {
+		return false
+	}
+	return true
+}
+
+add_command_events :: proc(database: ^SQLite_DB) -> bool {
+	if !sqlite_execute(database, "BEGIN IMMEDIATE") {
+		return false
+	}
+	current, read := database_pragma_int(database, "PRAGMA user_version")
+	if read && current >= 2 {
+		return sqlite_execute(database, "COMMIT")
+	}
+	if !read ||
+	   !sqlite_execute(database, COMMAND_EVENT_TABLE) ||
+	   !sqlite_execute(database, fmt.aprintf("PRAGMA user_version=%d", SCHEMA_VERSION, allocator = context.temp_allocator)) ||
+	   !sqlite_execute(database, "COMMIT") {
+		_ = sqlite_execute(database, "ROLLBACK")
+		return false
 	}
 	return true
 }

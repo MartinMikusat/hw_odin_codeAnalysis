@@ -12,8 +12,19 @@ Guard_Tool_Input :: struct {
 
 Guard_Input :: struct {
 	tool_name:  string,
-	tool_input: Guard_Tool_Input,
-	cwd:        string,
+	tool_input:      Guard_Tool_Input,
+	cwd:             string,
+	session_id:      string,
+	transcript_path: string,
+}
+
+Guard_Verdict :: struct {
+	block_reason:    string,
+	block_kind:      string,
+	session_id:      string,
+	transcript_path: string,
+	directory:       string,
+	observations:    []Observation,
 }
 
 Shell_Stage :: struct {
@@ -325,13 +336,25 @@ guard_command :: proc(command, working_directory: string) -> string {
 	return ""
 }
 
-guard_hook :: proc(source: string) -> string {
+guard_hook :: proc(source: string) -> (verdict: Guard_Verdict) {
 	input: Guard_Input
 	if json.unmarshal_string(source, &input, allocator = context.temp_allocator) != nil {
-		return ""
+		return
 	}
 	if input.tool_input.command == "" {
-		return ""
+		return
 	}
-	return guard_command(input.tool_input.command, input.cwd)
+	verdict.session_id = input.session_id
+	verdict.transcript_path = input.transcript_path
+	verdict.directory = input.cwd
+	verdict.block_reason = guard_command(input.tool_input.command, input.cwd)
+	switch verdict.block_reason {
+	case "":
+		verdict.observations = observe_command(input.tool_input.command, input.cwd)
+	case PIPED_COMPILE_REASON:
+		verdict.block_kind = "piped-compiler"
+	case SCRIPTED_EDIT_REASON:
+		verdict.block_kind = "scripted-rewrite"
+	}
+	return
 }

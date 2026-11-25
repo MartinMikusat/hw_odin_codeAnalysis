@@ -86,7 +86,7 @@ MCP results are optimized for agents. Discovery tools return compact symbol iden
 
 ### Local MCP usage data
 
-The MCP server records every input line, emitted response line, and derived event metric in `~/Library/Application Support/hw_odin_codeAnalysis/usage.sqlite3`. Recording is always active for MCP traffic, but a database failure does not change or delay a tool response beyond the bounded SQLite write attempt. The recorder retries after one minute, emits a throttled stderr diagnostic, and writes a synthetic gap event after recovery.
+The usage database is `~/Library/Application Support/hw_odin_codeAnalysis/usage.sqlite3`. The MCP server records every input line, emitted response line, and derived event metric there. Recording is always active for MCP traffic, but a database failure does not change or delay a tool response beyond the bounded SQLite write attempt. The recorder retries after one minute, emits a throttled stderr diagnostic, and writes a synthetic gap event after recovery.
 
 Request and response payloads remain local. Reports stop exposing a payload when its event is older than 90 days, and MCP startup or daily maintenance then removes the expired row. Session and event metrics remain in SQLite so reports can compare tool frequency, outcomes, latency, batch sizes, result counts, empty results, capability misses, ambiguous or unresolved resolutions, truncation, and byte volume over time. No data is uploaded.
 
@@ -123,6 +123,37 @@ nearest directory with `.git` or `code-analysis.json`.
 `scripts/odin_sessions.py` extracts local agent transcripts into a private SQLite
 database outside the repository, to measure tool use and failures after a process
 change.
+
+### Effectiveness tracking
+
+```sh
+hw-odin-analyze usage report --days 30
+hw-odin-analyze --root /path/to/project usage report
+hw-odin-analyze note "what the tool did not handle"
+```
+
+Every workflow and query command writes one row to the `command_events` table of
+the usage database: agent, session, project, tool build, outcome, reason,
+duration, counts and output size. The row is written at start as `unfinished`, so a
+killed or crashed run stays visible. `guard` adds a row for each block, and for
+shell work that went around the tool: direct compiler checks and builds, text
+searches and file reads of Odin sources, OLS queries and manual crash inspection.
+
+| Question | Report line |
+| --- | --- |
+| Do agents use it? | share of type checks through the tool, per agent |
+| Where do they go around it? | shell work outside the tool |
+| Does it shorten the fix loop? | checks and time from a failed check to a passing one |
+| Does it save context? | output size against compiler output size |
+| Where does it fail? | rejected edits, tool failures, agent notes |
+
+The share and the shell rows cover agents that run the `guard` hook. Reads and
+searches through an agent's own file tools are not observable. A `no-diagnostics`
+check failed without an error the tool could parse.
+
+Rows stay local and are kept. They hold no file content or edit text; details are
+bounded to 400 bytes and can contain compiler flags, symbol names, error lines and
+note text.
 
 ### Configuration
 

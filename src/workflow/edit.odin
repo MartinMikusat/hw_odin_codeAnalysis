@@ -34,8 +34,9 @@ Edited_File :: struct {
 }
 
 Edit_Report :: struct {
-	files:  []Edited_File,
-	errors: []string,
+	files:     []Edited_File,
+	errors:    []string,
+	rejection: string,
 }
 
 parse_block_edits :: proc(source: string) -> (edits: []Edit, error: string) {
@@ -226,12 +227,19 @@ plan_edits :: proc(base: string, edits: []Edit) -> Edit_Report {
 	files := make([dynamic]Edited_File, context.temp_allocator)
 	errors := make([dynamic]string, context.temp_allocator)
 	indexes := make(map[string]int, allocator = context.temp_allocator)
+	rejection := ""
+	reject :: proc(rejection: ^string, reason: string) {
+		if rejection^ == "" {
+			rejection^ = reason
+		}
+	}
 	for edit, number in edits {
 		path := absolute(base, edit.file)
 		index, known := indexes[path]
 		if !known {
 			file, load_error := load_edit_target(path, edit.old == "")
 			if load_error != "" {
+				reject(&rejection, "bad-target")
 				append(&errors, fmt.tprintf("edit %d %s: %s", number + 1, edit.file, load_error))
 				continue
 			}
@@ -242,6 +250,7 @@ plan_edits :: proc(base: string, edits: []Edit) -> Edit_Report {
 		file := &files[index]
 		if edit.old == "" {
 			if !file.created || file.applied > 0 {
+				reject(&rejection, "bad-target")
 				append(&errors, fmt.tprintf(
 					"edit %d %s: empty old text only creates a new file, and this file exists",
 					number + 1, edit.file,
@@ -254,6 +263,7 @@ plan_edits :: proc(base: string, edits: []Edit) -> Edit_Report {
 		}
 		offsets := match_offsets(file.content, edit.old, edit.line_anchored)
 		if len(offsets) != edit.count {
+			reject(&rejection, len(offsets) == 0 ? "no-match" : "count-mismatch")
 			detail: string
 			if len(offsets) == 0 {
 				detail = miss_hint(file.content, edit.old)
@@ -284,7 +294,7 @@ plan_edits :: proc(base: string, edits: []Edit) -> Edit_Report {
 		file.content = strings.to_string(builder)
 		file.applied += 1
 	}
-	return {files = files[:], errors = errors[:]}
+	return {files = files[:], errors = errors[:], rejection = rejection}
 }
 
 final_content :: proc(file: Edited_File) -> string {
