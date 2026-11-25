@@ -17,11 +17,19 @@ Guard_Input :: struct {
 	session_id:      string,
 	transcript_path: string,
 	agent:           string,
+	conversation_id: string `json:"conversationId"`,
+	tool_call:       struct {
+		args: struct {
+			CommandLine: string,
+			Cwd:         string,
+		},
+	} `json:"toolCall"`,
 }
 
 Guard_Verdict :: struct {
 	block_reason:    string,
 	block_kind:      string,
+	decision_json:   bool,
 	agent:           string,
 	session_id:      string,
 	transcript_path: string,
@@ -343,17 +351,27 @@ guard_hook :: proc(source: string) -> (verdict: Guard_Verdict) {
 	if json.unmarshal_string(source, &input, allocator = context.temp_allocator) != nil {
 		return
 	}
-	if input.tool_input.command == "" {
-		return
-	}
+	command := input.tool_input.command
 	verdict.agent = input.agent
 	verdict.session_id = input.session_id
 	verdict.transcript_path = input.transcript_path
 	verdict.directory = input.cwd
-	verdict.block_reason = guard_command(input.tool_input.command, input.cwd)
+	if input.conversation_id != "" {
+		verdict.decision_json = true
+		verdict.agent = "antigravity"
+		verdict.session_id = input.conversation_id
+		command = input.tool_call.args.CommandLine
+		if input.tool_call.args.Cwd != "" {
+			verdict.directory = input.tool_call.args.Cwd
+		}
+	}
+	if command == "" {
+		return
+	}
+	verdict.block_reason = guard_command(command, verdict.directory)
 	switch verdict.block_reason {
 	case "":
-		verdict.observations = observe_command(input.tool_input.command, input.cwd)
+		verdict.observations = observe_command(command, verdict.directory)
 	case PIPED_COMPILE_REASON:
 		verdict.block_kind = "piped-compiler"
 	case SCRIPTED_EDIT_REASON:

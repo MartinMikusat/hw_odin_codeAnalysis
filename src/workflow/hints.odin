@@ -15,7 +15,8 @@ DECLARATION_LINES_MAX :: 30
 SHOWN_SYMBOLS_MAX :: 4
 SHOWN_LINES_MAX :: 160
 
-Query :: proc(root, command, argument: string) -> (payload: string, ok: bool)
+Query :: proc(root, command: string, arguments: ..string) -> (payload: string, ok: bool)
+USES_SHOWN_MAX :: 80
 
 Scored_Symbol :: struct {
 	symbol: analysis.Symbol,
@@ -302,6 +303,69 @@ add_hints :: proc(query: Query, report: ^Check_Report) {
 			}
 		}
 	}
+}
+
+uses :: proc(query: Query, root, name: string) -> (text: string, found: int, ok: bool) {
+	declarations := named_declarations(query, root, name)
+	if len(declarations) == 0 {
+		suggestion := similar_global(query, root, last_segment(name))
+		return fmt.tprintf("uses: %q is not declared in the indexed sources. %s", name, suggestion), 0, false
+	}
+	builder := strings.builder_make(context.temp_allocator)
+	files := make(map[string][]string, allocator = context.temp_allocator)
+	shown := 0
+	for symbol, index in declarations {
+		if index >= SHOWN_SYMBOLS_MAX {
+			fmt.sbprintfln(
+				&builder, "%d more declarations; qualify the name as PACKAGE.NAME",
+				len(declarations) - index,
+			)
+			break
+		}
+		payload, answered := query(
+			root, "references", symbol.path,
+			fmt.tprint(symbol.range.start.line), fmt.tprint(symbol.range.start.column),
+		)
+		occurrences: []analysis.Occurrence
+		if !answered || json.unmarshal_string(payload, &occurrences, allocator = context.temp_allocator) != nil {
+			return fmt.tprintf("uses: the analyzer did not answer for %s", name), found, false
+		}
+		list := make([dynamic]analysis.Occurrence, context.temp_allocator)
+		for occurrence in occurrences {
+			if occurrence.path == symbol.path && occurrence.range.start.line == symbol.range.start.line {
+				continue
+			}
+			append(&list, occurrence)
+		}
+		found += len(list)
+		fmt.sbprintfln(
+			&builder, "%s.%s %v %s:%d: %d uses", symbol.package_name, symbol.name, symbol.kind,
+			display_path(root, symbol.path), symbol.range.start.line, len(list),
+		)
+		for occurrence in list {
+			if shown >= USES_SHOWN_MAX {
+				break
+			}
+			shown += 1
+			lines, cached := files[occurrence.path]
+			if !cached {
+				source, _ := read_text(occurrence.path)
+				lines = strings.split_lines(source, context.temp_allocator)
+				files[occurrence.path] = lines
+			}
+			line := occurrence.range.start.line
+			text := line >= 1 && line <= len(lines) ? strings.trim_space(lines[line - 1]) : ""
+			fmt.sbprintfln(&builder, "  %s:%d  %s", display_path(root, occurrence.path), line, text)
+		}
+	}
+	if found > shown {
+		fmt.sbprintfln(&builder, "%d more uses are not listed", found - shown)
+	}
+	strings.write_string(
+		&builder,
+		"uses come from the analyzer's index; dynamic or ambiguous references can be missing\n",
+	)
+	return strings.to_string(builder), found, true
 }
 
 show :: proc(query: Query, root, name: string) -> (text: string, ok: bool) {

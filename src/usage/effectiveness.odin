@@ -97,6 +97,7 @@ effectiveness_report :: proc(days: int, project: string) -> (text: string, ok: b
 	failures := make([dynamic]Command_Event, context.temp_allocator)
 	notes := make([dynamic]Command_Event, context.temp_allocator)
 	checks, errors, hints, retries, pins, raw_bytes, output_bytes, hunks, redirected, blocked: int
+	project_builds: int
 
 	now := now_unix_ns()
 	for event, position in events {
@@ -118,6 +119,10 @@ effectiveness_report :: proc(days: int, project: string) -> (text: string, ok: b
 		}
 		switch event.command {
 		case "shell":
+			if event.reason == "direct-build" {
+				project_builds += 1
+				continue
+			}
 			tally_add(&bypasses, event.reason)
 			if event.reason == "direct-check" {
 				use.direct += 1
@@ -155,8 +160,10 @@ effectiveness_report :: proc(days: int, project: string) -> (text: string, ok: b
 			hints += event.hints
 			retries += event.retries
 			pins += event.pins
-			raw_bytes += event.raw_bytes
-			output_bytes += event.output_bytes
+			if event.outcome == "failed" {
+				raw_bytes += event.raw_bytes
+				output_bytes += event.output_bytes
+			}
 			key := fmt.tprintf("%s|%s", event.session, event.project)
 			open := -1
 			for loop, index in open_loops {
@@ -190,6 +197,7 @@ effectiveness_report :: proc(days: int, project: string) -> (text: string, ok: b
 		)
 	}
 	fmt.sbprintfln(&builder, "  shell work outside the tool: %s", tally_text(bypasses[:]))
+	fmt.sbprintfln(&builder, "  project builds (expected, not counted above): %d", project_builds)
 
 	slice.sort(check_durations[:])
 	slice.sort(loop_checks[:])
@@ -201,7 +209,7 @@ effectiveness_report :: proc(days: int, project: string) -> (text: string, ok: b
 		errors, hints, retries, pins,
 	)
 	fmt.sbprintfln(
-		&builder, "  output %.1f KB from %.1f KB of compiler output",
+		&builder, "  failed checks: output %.1f KB from %.1f KB of compiler output",
 		f64(output_bytes) / 1024, f64(raw_bytes) / 1024,
 	)
 	if len(loop_checks) > 0 {

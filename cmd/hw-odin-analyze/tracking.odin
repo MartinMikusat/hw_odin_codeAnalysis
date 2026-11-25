@@ -26,6 +26,7 @@ detect_agent :: proc() -> (agent, session: string) {
 		{"codex", "CODEX_THREAD_ID", "CODEX_THREAD_ID"},
 		{"opencode", "OPENCODE", "OPENCODE_SESSION_ID"},
 		{"pi", "PI_CODING_AGENT", "PI_SESSION_ID"},
+		{"antigravity", "ANTIGRAVITY_AGENT", "ANTIGRAVITY_CONVERSATION_ID"},
 	}
 	for marker in markers {
 		if _, found := os.lookup_env(marker.presence, context.temp_allocator); found {

@@ -26,6 +26,7 @@ Workflow commands (text output; the project root is the nearest repository):
   check [NAME...] [--no-pins] [--max N]
   edit [--no-check] [--check NAME] < HUNKS
   show NAME
+  uses NAME            list where a declaration is used
   crash [--app NAME] [--report FILE] [--devlog DIRECTORY]
   guard < HOOK.json
   note TEXT            record what the tool did not handle
@@ -1837,6 +1838,12 @@ main :: proc() {
 		fmt.println("hw-odin-analyze", service.VERSION)
 		return
 	}
+	for argument in arguments[1:] {
+		if argument == "--help" || argument == "-h" {
+			print_usage()
+			return
+		}
+	}
 	if arguments[0] == "__daemon" {
 		run_daemon(root)
 		return
@@ -1865,6 +1872,9 @@ main :: proc() {
 		return
 	case "check":
 		run_check(root, root_explicit, arguments[1:])
+		return
+	case "uses":
+		run_uses(root, root_explicit, arguments[1:])
 		return
 	case "edit":
 		run_edit(root, root_explicit, arguments[1:])

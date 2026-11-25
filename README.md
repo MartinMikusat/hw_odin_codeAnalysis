@@ -114,6 +114,9 @@ nearest directory with `.git` or `code-analysis.json`.
   lines, and then checks each touched project. A rejected hunk shows the first
   differing line when it can locate the candidate block.
 - `show` prints declarations by name.
+- `uses` lists where a named declaration is used, with each source line. The
+  index finds qualified uses from other packages only when their collection is
+  configured.
 - With matching debug symbols, `crash` resolves source lines from a macOS
   crash report.
   With `--devlog DIRECTORY`, it shows recent errors from the latest journal
@@ -123,10 +126,13 @@ nearest directory with `.git` or `code-analysis.json`.
   command that hides its status, or for a rewrite script over Odin files that
   asserts no match count.
 
-Four agents run `guard` before shell commands. Claude Code
-(`~/.claude/settings.json`) and Codex (`~/.codex/hooks.json`) call it from their
-`PreToolUse` hooks. pi and OpenCode load the adapters in [`hooks/`](hooks/)
-through links:
+Five agents run `guard` before shell commands. Claude Code
+(`~/.claude/settings.json`), Codex (`~/.codex/hooks.json`) and Antigravity
+(`~/.gemini/config/hooks.json`, matcher `run_command`) call it from their
+`PreToolUse` hooks. For Antigravity's payload, `guard` answers with a JSON
+decision on standard output: `deny` with a reason, or `{}` to leave the decision
+to Antigravity. pi and OpenCode load the adapters in [`hooks/`](hooks/) through
+links:
 
 ```sh
 ln -s "$PWD/hooks/pi-guard.ts" ~/.pi/agent/extensions/hw-odin-guard.ts
@@ -161,6 +167,9 @@ searches and file reads of Odin sources, OLS queries and manual crash inspection
 | Does it shorten the fix loop? | checks and time from a failed check to a passing one |
 | Does it save context? | output size against compiler output size |
 | Where does it fail? | rejected edits, tool failures, agent notes |
+
+Project builds are listed apart from the shell work outside the tool, because the
+rules expect them. The output-size line covers failed checks only.
 
 The share and the shell rows cover agents that run the `guard` hook. Reads and
 searches through an agent's own file tools are not observable. A `no-diagnostics`

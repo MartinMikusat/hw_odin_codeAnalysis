@@ -1,5 +1,6 @@
 package main
 
+import "core:encoding/json"
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
@@ -30,14 +31,14 @@ read_standard_input :: proc(maximum: int) -> (string, bool) {
 	return "", false
 }
 
-daemon_query :: proc(root, command, argument: string) -> (string, bool) {
+daemon_query :: proc(root, command: string, arguments: ..string) -> (string, bool) {
 	paths, paths_ok := transport.runtime_paths(root, context.temp_allocator)
 	if !paths_ok || !ensure_daemon(root, paths) {
 		track_daemon_failure()
 		return "", false
 	}
 	response, contacted := send_request(
-		paths.socket_path, command, {argument}, true, context.temp_allocator,
+		paths.socket_path, command, arguments, true, context.temp_allocator,
 	)
 	if !contacted {
 		track_daemon_failure()
@@ -195,15 +196,30 @@ run_guard :: proc() {
 		return
 	}
 	verdict := workflow.guard_hook(source)
-	if verdict.block_reason != "" {
-		record_shell_event(verdict, "guard", "blocked", verdict.block_kind, "", verdict.directory)
-		fmt.eprintln(verdict.block_reason)
-		os.exit(HOOK_BLOCK_EXIT_CODE)
-	}
 	for observation in verdict.observations {
 		record_shell_event(
 			verdict, "shell", "observed", observation.kind, observation.detail, observation.directory,
 		)
+	}
+	if verdict.block_reason != "" {
+		record_shell_event(verdict, "guard", "blocked", verdict.block_kind, "", verdict.directory)
+	}
+	if verdict.decision_json {
+		Decision :: struct {
+			decision: string `json:"decision,omitempty"`,
+			reason:   string `json:"reason,omitempty"`,
+		}
+		answer := Decision{}
+		if verdict.block_reason != "" {
+			answer = {"deny", verdict.block_reason}
+		}
+		data, _ := json.marshal(answer, allocator = context.temp_allocator)
+		fmt.println(string(data))
+		return
+	}
+	if verdict.block_reason != "" {
+		fmt.eprintln(verdict.block_reason)
+		os.exit(HOOK_BLOCK_EXIT_CODE)
 	}
 }
 
@@ -231,6 +247,18 @@ run_crash :: proc(root: string, explicit: bool, arguments: []string) {
 		tracked.event.reason = "symbolized"
 	} else {
 		tracked.event.reason = "no-symbols"
+	}
+	finish(text, ok)
+}
+
+run_uses :: proc(root: string, explicit: bool, arguments: []string) {
+	if len(arguments) != 1 {
+		fail("usage: uses NAME or uses PACKAGE.NAME")
+	}
+	text, found, ok := workflow.uses(daemon_query, project_root(root, explicit), arguments[0])
+	tracked.event.results = found
+	if !ok && tracked.event.outcome == "" {
+		tracked.event.outcome, tracked.event.detail = "not-found", arguments[0]
 	}
 	finish(text, ok)
 }

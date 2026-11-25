@@ -6,7 +6,7 @@
             "command": ["hw-odin", "check", "cmd/hw-odin-analyze", "-collection:code_analysis=src", "-strict-style"]
         }
     ],
-    "collections": [],
+    "collections": [{"name": "code_analysis", "path": "src"}],
     "exclude_paths": [
         ".git",
         "build",
