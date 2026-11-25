@@ -128,7 +128,7 @@ record_command_event :: proc(event: Command_Event, id: i64 = 0) -> (row: i64, ok
 	return sqlite3_last_insert_rowid(database), true
 }
 
-load_command_events :: proc(days: int, project: string) -> (events: []Command_Event, ok: bool) {
+load_command_events :: proc(days: int, project: string, build := "") -> (events: []Command_Event, ok: bool) {
 	database := open_event_database() or_return
 	defer sqlite3_close_v2(database)
 	statement := sqlite_prepare(
@@ -137,7 +137,7 @@ load_command_events :: proc(days: int, project: string) -> (events: []Command_Ev
 		        outcome, reason, detail, errors, warnings, hints, retries, pins, hunks,
 		        results, raw_bytes, output_bytes
 		 FROM command_events
-		 WHERE started_at_ns >= ? AND (? = '' OR project = ?)
+		 WHERE started_at_ns >= ? AND (? = '' OR project = ?) AND (? = '' OR build = ?)
 		 ORDER BY started_at_ns DESC, id DESC LIMIT ?`,
 	) or_return
 	defer sqlite3_finalize(statement)
@@ -145,7 +145,9 @@ load_command_events :: proc(days: int, project: string) -> (events: []Command_Ev
 	if !sqlite_bind_i64_value(statement, 1, since) ||
 	   !sqlite_bind_text_value(statement, 2, project) ||
 	   !sqlite_bind_text_value(statement, 3, project) ||
-	   !sqlite_bind_int_value(statement, 4, EVENT_REPORT_ROWS_MAX) {
+	   !sqlite_bind_text_value(statement, 4, build) ||
+	   !sqlite_bind_text_value(statement, 5, build) ||
+	   !sqlite_bind_int_value(statement, 6, EVENT_REPORT_ROWS_MAX) {
 		return nil, false
 	}
 	list := make([dynamic]Command_Event, context.temp_allocator)

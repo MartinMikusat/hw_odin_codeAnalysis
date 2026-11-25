@@ -12,6 +12,7 @@ Check_Step :: struct {
 	name:           string,
 	command:        []string,
 	forwards_flags: bool,
+	source:         string `json:"-"`,
 	workspace_gate: string `json:"-"`,
 }
 
@@ -94,20 +95,21 @@ check_steps :: proc(root: string) -> (steps: []Check_Step, error: string) {
 		if json.unmarshal_string(text, &config, allocator = context.temp_allocator) != nil {
 			return nil, "code-analysis.json is not valid JSON"
 		}
-		for step in config.check {
+		for &step in config.check {
 			if step.name == "" || len(step.command) == 0 {
 				return nil, "each check step in code-analysis.json needs a name and a command"
 			}
+			step.source = config_path
 		}
 		if len(config.check) > 0 {
 			return config.check, ""
 		}
 	}
 	list := make([dynamic]Check_Step, context.temp_allocator)
-	if gate, found := analysis.workspace_gate(root); found {
+	if gate, source, found := analysis.workspace_gate_source(root); found {
 		command := make([dynamic]string, context.temp_allocator)
 		append(&command, "/bin/sh", "-c", gate)
-		append(&list, Check_Step{name = "workspace", command = command[:], workspace_gate = gate})
+		append(&list, Check_Step{name = "workspace", command = command[:], source = source, workspace_gate = gate})
 		return list[:], ""
 	}
 	if !is_odin_project(root) {
@@ -119,9 +121,12 @@ check_steps :: proc(root: string) -> (steps: []Check_Step, error: string) {
 	}
 	command := make([dynamic]string, context.temp_allocator)
 	append(&command, "hw-odin", "check", root, "-no-entry-point")
-	if text, found := read_text(join(root, "ols.json")); found {
+	ols_path := join(root, "ols.json")
+	source := ""
+	if text, found := read_text(ols_path); found {
 		config: OLS_Config
 		if json.unmarshal_string(text, &config, allocator = context.temp_allocator) == nil {
+			source = ols_path
 			for collection in config.collections {
 				flag := strings.concatenate(
 					{"-collection:", collection.name, "=", absolute(root, collection.path)},
@@ -131,6 +136,6 @@ check_steps :: proc(root: string) -> (steps: []Check_Step, error: string) {
 			}
 		}
 	}
-	append(&list, Check_Step{name = "check", command = command[:], forwards_flags = true})
+	append(&list, Check_Step{name = "check", command = command[:], forwards_flags = true, source = source})
 	return list[:], ""
 }

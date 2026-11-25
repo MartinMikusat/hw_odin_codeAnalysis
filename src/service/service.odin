@@ -8,7 +8,7 @@ import "core:sys/posix"
 
 import "code_analysis:analysis"
 
-VERSION :: "0.6.0"
+VERSION :: "0.7.0"
 
 Request :: struct {
 	version:   int,
@@ -108,6 +108,30 @@ execute :: proc(
 		}
 		payload, ok = encode(
 			analysis.search(state, arguments[0], context.temp_allocator),
+			request.compact,
+			allocator,
+		)
+	case "declarations":
+		if len(arguments) != 1 {
+			return Response{error = "declarations requires NAME"}
+		}
+		payload, ok = encode(
+			analysis.qualified_declarations(state, arguments[0], context.temp_allocator),
+			request.compact,
+			allocator,
+		)
+	case "diagnostic-declarations":
+		if len(arguments) != 4 {
+			return Response{error = "diagnostic-declarations requires FILE LINE COLUMN call|literal"}
+		}
+		line, column, position_ok := parse_position(arguments, 1)
+		if !position_ok || (arguments[3] != "call" && arguments[3] != "literal") {
+			return Response{error = "expected positive LINE and COLUMN and call or literal"}
+		}
+		path, _, _ := analysis.query_path(state, arguments[0], context.temp_allocator)
+		expression := analysis.Diagnostic_Expression.Call if arguments[3] == "call" else .Literal
+		payload, ok = encode(
+			analysis.diagnostic_declarations(state, path, line, column, expression, context.temp_allocator),
 			request.compact,
 			allocator,
 		)

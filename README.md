@@ -113,10 +113,16 @@ nearest directory with `.git` or `code-analysis.json`.
 - `edit` applies every hunk or none, requires the stated match count on whole
   lines, and then checks each touched project. A rejected hunk shows the first
   differing line when it can locate the candidate block.
-- `show` prints declarations by name.
-- `uses` lists where a named declaration is used, with each source line. The
-  index finds qualified uses from other packages only when their collection is
-  configured.
+- `check --explain` shows the project root, configuration source, and compiler
+  command before execution. This option leaves compiler and pin state untouched.
+  Failed checks group repeated diagnostics and link relevant declarations.
+  Use `check --full` to see the complete captured compiler output.
+- `show` prints declarations by name. Use `TYPE.FIELD` or `PACKAGE.TYPE.FIELD`
+  to look up a struct field. The tool lists competing declarations when a
+  name matches more than one.
+- `uses` lists indexed references for the same names. For struct fields, the
+  index follows declared receiver types and explicitly typed literals.
+  Reference coverage depends on the configured collections and type information.
 - With matching debug symbols, `crash` resolves source lines from a macOS
   crash report.
   With `--devlog DIRECTORY`, it shows recent errors from the latest journal
@@ -149,7 +155,7 @@ change.
 
 ```sh
 hw-odin-analyze usage report --days 30
-hw-odin-analyze --root /path/to/project usage report
+hw-odin-analyze usage report --project /path/to/project --build current
 hw-odin-analyze note "what the tool did not handle"
 ```
 
@@ -164,12 +170,14 @@ searches and file reads of Odin sources, OLS queries and manual crash inspection
 | --- | --- |
 | Do agents use it? | share of type checks through the tool, per agent |
 | Where do they go around it? | shell work outside the tool |
-| Does it shorten the fix loop? | checks and time from a failed check to a passing one |
+| Does it shorten the fix loop? | checks, elapsed time, and observed lookups from a compiler error to a passing check |
 | Does it save context? | output size against compiler output size |
-| Where does it fail? | rejected edits, tool failures, agent notes |
+| Where does it fail? | rejected edits, retries after rejection, tool failures, agent notes |
 
-Project builds are listed apart from the shell work outside the tool, because the
-rules expect them. The output-size line covers failed checks only.
+Project builds have a separate count. The output-size line covers failed checks.
+Use an exact build ID from the report to inspect an older build. Recovery counts
+group events by agent, session, and project when a session ID is available.
+An edit attempt within ten minutes of a rejection counts as a retry.
 
 The share and the shell rows cover agents that run the `guard` hook. Reads and
 searches through an agent's own file tools are not observable. A `no-diagnostics`

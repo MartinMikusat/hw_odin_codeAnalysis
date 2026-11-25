@@ -1,6 +1,7 @@
 package analysis
 
 import "core:path/filepath"
+import "core:strings"
 
 Symbol_Name_Index :: map[string][dynamic]Symbol_ID
 
@@ -139,6 +140,24 @@ resolve_occurrence :: proc(
 		return declaration
 	}
 
+	if occurrence.is_selector {
+		if imported := resolve_import_selector(
+			state,
+			occurrence,
+			candidates,
+		); int(imported) >= 0 {
+			return imported
+		}
+		if field := resolve_field_selector(
+			state,
+			occurrence,
+			candidates,
+		); int(field) >= 0 {
+			return field
+		}
+		return Symbol_ID(-1)
+	}
+
 	best_local := Symbol_ID(-1)
 	best_offset := -1
 	occurrence_scope, has_occurrence_scope := enclosing_procedure(
@@ -157,9 +176,8 @@ resolve_occurrence :: proc(
 				continue
 			}
 		}
-		if symbol.kind != .Parameter &&
-		   (occurrence.range.start.offset < symbol.extent.start.offset ||
-		    occurrence.range.start.offset >= symbol.extent.end.offset) {
+		if occurrence.range.start.offset < symbol.extent.start.offset ||
+		   occurrence.range.start.offset >= symbol.extent.end.offset {
 			continue
 		}
 		if symbol.range.start.offset <= occurrence.range.start.offset &&
@@ -170,24 +188,6 @@ resolve_occurrence :: proc(
 	}
 	if int(best_local) >= 0 {
 		return best_local
-	}
-
-	if occurrence.is_selector {
-		if imported := resolve_import_selector(
-			state,
-			occurrence,
-			candidates,
-		); int(imported) >= 0 {
-			return imported
-		}
-		if field := resolve_field_selector(
-			state,
-			occurrence,
-			candidates,
-		); int(field) >= 0 {
-			return field
-		}
-		return Symbol_ID(-1)
 	}
 
 	package_match, package_count := same_package_match(
@@ -342,25 +342,54 @@ is_identifier_byte :: proc(value: byte) -> bool {
 	       value >= '0' && value <= '9'
 }
 
-resolve_base_symbol :: proc(
-	state: ^Analysis_Context,
-	occurrence: Occurrence,
-) -> Symbol_ID {
-	best := Symbol_ID(-1)
-	best_offset := -1
-	for candidate_index in state.occurrences_by_path[occurrence.path] {
-		candidate := state.occurrences[candidate_index]
-		if candidate.name != occurrence.selector_base ||
-		   candidate.range.start.offset >= occurrence.range.start.offset ||
-		   int(candidate.symbol) < 0 {
-			continue
-		}
-		if candidate.range.start.offset > best_offset {
-			best = candidate.symbol
-			best_offset = candidate.range.start.offset
+resolve_base_symbol :: proc(state: ^Analysis_Context, occurrence: Occurrence) -> Symbol_ID {
+	if occurrence.receiver_offset == 0 { return Symbol_ID(-1) }
+	for index in state.occurrences_by_path[occurrence.path] {
+		receiver := state.occurrences[index]
+		if receiver.range.start.offset + 1 == occurrence.receiver_offset {
+			return receiver.symbol
 		}
 	}
-	return best
+	return Symbol_ID(-1)
+}
+
+record_type :: proc(state: ^Analysis_Context, base: Symbol) -> Symbol_ID {
+	if is_type_symbol(base) { return base.id }
+	name := strings.trim_space(base.detail)
+	for strings.has_prefix(name, "^") {
+		name = strings.trim_space(name[1:])
+	}
+	directory := base.package_directory
+	if dot := strings.index_byte(name, '.'); dot >= 0 {
+		directory = ""
+		for index in state.imports_by_path[base.path] {
+			imported := state.imports[index]
+			if imported.alias == name[:dot] {
+				directory = imported.resolved_path
+				break
+			}
+		}
+		if directory == "" { return Symbol_ID(-1) }
+		name = name[dot + 1:]
+	}
+	global := Symbol_ID(-1)
+	local := Symbol_ID(-1)
+	local_offset := -1
+	global_count := 0
+	for id in state.symbols_by_name[name] {
+		candidate := state.symbols[int(id)]
+		if candidate.package_directory != directory || !is_type_symbol(candidate) { continue }
+		if candidate.is_global {
+			global, global_count = id, global_count + 1
+		} else if candidate.path == base.path &&
+		          candidate.range.start.offset < base.range.start.offset &&
+		          candidate.range.start.offset > local_offset &&
+		          base.range.start.offset < candidate.extent.end.offset {
+			local, local_offset = id, candidate.range.start.offset
+		}
+	}
+	if int(local) >= 0 { return local }
+	return global if global_count == 1 else Symbol_ID(-1)
 }
 
 resolve_field_selector :: proc(
@@ -369,44 +398,22 @@ resolve_field_selector :: proc(
 	candidates: []Symbol_ID,
 ) -> Symbol_ID {
 	base_id := resolve_base_symbol(state, occurrence)
-	if int(base_id) < 0 {
-		return Symbol_ID(-1)
-	}
-	base := state.symbols[int(base_id)]
-	type_symbol := Symbol_ID(-1)
-	for candidate_id in state.symbols_by_package[base.package_directory] {
-		candidate := state.symbols[int(candidate_id)]
-		if candidate.kind != .Struct &&
-		   candidate.kind != .Union &&
-		   candidate.kind != .Enum {
-			continue
-		}
-		if candidate.package_directory == base.package_directory &&
-		   contains_identifier(base.detail, candidate.name) {
-			type_symbol = candidate.id
-			break
-		}
-	}
-	if int(type_symbol) < 0 {
-		return Symbol_ID(-1)
-	}
-	type_value := state.symbols[int(type_symbol)]
+	if int(base_id) < 0 { return Symbol_ID(-1) }
+	type_id := record_type(state, state.symbols[int(base_id)])
+	if int(type_id) < 0 { return Symbol_ID(-1) }
+	owner := state.symbols[int(type_id)]
 	match := Symbol_ID(-1)
-	count := 0
 	for field_id in candidates {
 		field := state.symbols[int(field_id)]
-		if field.kind == .Field &&
-		   field.name == occurrence.name &&
-		   field.owner_type == type_value.name &&
-		   field.package_directory == type_value.package_directory {
-			match = field.id
-			count += 1
+		if field.kind != .Field || field.path != owner.path || field.owner_type != owner.name ||
+		   field.range.start.offset <= owner.range.start.offset ||
+		   field.range.start.offset >= owner.extent.end.offset {
+			continue
 		}
+		if int(match) >= 0 { return Symbol_ID(-1) }
+		match = field.id
 	}
-	if count == 1 {
-		return match
-	}
-	return Symbol_ID(-1)
+	return match
 }
 
 resolve_occurrences :: proc(state: ^Analysis_Context, start := 0) -> bool {

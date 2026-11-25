@@ -12,7 +12,7 @@ BUILD :: #config(HW_BUILD, "unknown")
 
 Tracked_Command :: struct {
 	active:        bool,
-	daemon_failed: bool,
+	daemon_failure: string,
 	row:           i64,
 	started:       time.Tick,
 	event:         usage.Command_Event,
@@ -67,8 +67,8 @@ track_finish :: proc() {
 		return
 	}
 	tracked.active = false
-	if tracked.daemon_failed && tracked.event.command != "check" {
-		tracked.event.outcome, tracked.event.reason = "error", "daemon-unavailable"
+	if tracked.daemon_failure != "" && tracked.event.command != "check" {
+		tracked.event.outcome, tracked.event.reason = "error", tracked.daemon_failure
 	}
 	if tracked.event.outcome == "" {
 		tracked.event.outcome = "ok"
@@ -79,9 +79,9 @@ track_finish :: proc() {
 	}
 }
 
-track_daemon_failure :: proc() {
+track_daemon_failure :: proc(reason: string) {
 	if tracked.active {
-		tracked.daemon_failed = true
+		tracked.daemon_failure = reason
 	}
 }
 

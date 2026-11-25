@@ -33,15 +33,19 @@ read_standard_input :: proc(maximum: int) -> (string, bool) {
 
 daemon_query :: proc(root, command: string, arguments: ..string) -> (string, bool) {
 	paths, paths_ok := transport.runtime_paths(root, context.temp_allocator)
-	if !paths_ok || !ensure_daemon(root, paths) {
-		track_daemon_failure()
+	if !paths_ok {
+		track_daemon_failure("daemon-path")
+		return "", false
+	}
+	if !ensure_daemon(root, paths) {
+		track_daemon_failure("daemon-start")
 		return "", false
 	}
 	response, contacted := send_request(
 		paths.socket_path, command, arguments, true, context.temp_allocator,
 	)
 	if !contacted {
-		track_daemon_failure()
+		track_daemon_failure("daemon-contact")
 	}
 	return response.payload, contacted && response.ok
 }
@@ -72,10 +76,10 @@ perform_check :: proc(options: workflow.Check_Options, via := "") -> bool {
 		track_start("check", options.root, via)
 	}
 	report := workflow.check(options)
-	if !report.passed && report.error == "" {
+	if !report.passed && report.error == "" && !options.full {
 		workflow.add_hints(daemon_query, &report)
 	}
-	text := strings.trim_right_space(workflow.format_check(report, options.shown))
+	text := strings.trim_right_space(workflow.format_check(report, options.shown, options.full))
 	fmt.println(text)
 	track_check_report(report, text)
 	track_finish()
@@ -84,11 +88,16 @@ perform_check :: proc(options: workflow.Check_Options, via := "") -> bool {
 
 run_check :: proc(root: string, explicit: bool, arguments: []string) {
 	options := workflow.Check_Options{root = project_root(root, explicit)}
+	if !explicit { options.hint_directory = root }
 	names := make([dynamic]string, context.temp_allocator)
 	for index := 0; index < len(arguments); index += 1 {
 		switch arguments[index] {
 		case "--no-pins":
 			options.no_pins = true
+		case "--explain":
+			options.explain = true
+		case "--full":
+			options.full = true
 		case "--max":
 			options.shown = parse_positive_option("--max", option_value(arguments, &index), 10000)
 		case:
@@ -99,6 +108,9 @@ run_check :: proc(root: string, explicit: bool, arguments: []string) {
 		}
 	}
 	options.names = names[:]
+	if options.explain {
+		tracked.event.command = "check-plan"
+	}
 	if !perform_check(options) {
 		os.exit(1)
 	}
@@ -251,11 +263,30 @@ run_crash :: proc(root: string, explicit: bool, arguments: []string) {
 	finish(text, ok)
 }
 
+explain_daemon_failure :: proc(root: string) {
+	switch tracked.daemon_failure {
+	case "daemon-path":
+		fail(fmt.tprintf("could not create a socket path for %s; check the user cache directory", root))
+	case "daemon-start":
+		fail(fmt.tprintf(
+			"the analyzer did not start for %s; run hw-odin-analyze --root %s status",
+			root, workflow.shell_word(root),
+		))
+	case "daemon-contact":
+		fail(fmt.tprintf(
+			"the analyzer stopped responding for %s; run hw-odin-analyze --root %s restart",
+			root, workflow.shell_word(root),
+		))
+	}
+}
+
 run_uses :: proc(root: string, explicit: bool, arguments: []string) {
 	if len(arguments) != 1 {
-		fail("usage: uses NAME or uses PACKAGE.NAME")
+		fail("usage: uses NAME, PACKAGE.NAME, TYPE.FIELD, or PACKAGE.TYPE.FIELD")
 	}
-	text, found, ok := workflow.uses(daemon_query, project_root(root, explicit), arguments[0])
+	project := project_root(root, explicit)
+	text, found, ok := workflow.uses(daemon_query, project, arguments[0])
+	if !ok { explain_daemon_failure(project) }
 	tracked.event.results = found
 	if !ok && tracked.event.outcome == "" {
 		tracked.event.outcome, tracked.event.detail = "not-found", arguments[0]
@@ -265,9 +296,11 @@ run_uses :: proc(root: string, explicit: bool, arguments: []string) {
 
 run_show :: proc(root: string, explicit: bool, arguments: []string) {
 	if len(arguments) != 1 {
-		fail("usage: show NAME or show PACKAGE.NAME")
+		fail("usage: show NAME, PACKAGE.NAME, TYPE.FIELD, or PACKAGE.TYPE.FIELD")
 	}
-	text, found := workflow.show(daemon_query, project_root(root, explicit), arguments[0])
+	project := project_root(root, explicit)
+	text, found := workflow.show(daemon_query, project, arguments[0])
+	if !found { explain_daemon_failure(project) }
 	if !found && tracked.event.outcome == "" {
 		tracked.event.outcome, tracked.event.detail = "not-found", arguments[0]
 	}

@@ -1,6 +1,5 @@
 package workflow
 
-import "core:fmt"
 import "core:strconv"
 import "core:strings"
 
@@ -20,6 +19,18 @@ Compiler_Diagnostic :: struct {
 Compiler_Output :: struct {
 	diagnostics: []Compiler_Diagnostic,
 	other:       []string,
+}
+
+Diagnostic_Key :: struct {
+	path, message: string,
+	line, column:  int,
+	warning:       bool,
+}
+
+diagnostic_key :: proc(diagnostic: Compiler_Diagnostic, root := "") -> Diagnostic_Key {
+	path := diagnostic.path
+	if root != "" { path = absolute(root, path) }
+	return {path, diagnostic.message, diagnostic.line, diagnostic.column, diagnostic.warning}
 }
 
 parse_diagnostic_line :: proc(line: string) -> (diagnostic: Compiler_Diagnostic, ok: bool) {
@@ -87,7 +98,7 @@ is_toolchain_error :: proc(line: string) -> bool {
 parse_compiler_output :: proc(output: string) -> Compiler_Output {
 	diagnostics := make([dynamic]Compiler_Diagnostic, context.temp_allocator)
 	other := make([dynamic]string, context.temp_allocator)
-	seen := make(map[string]int, allocator = context.temp_allocator)
+	seen := make(map[Diagnostic_Key]int, allocator = context.temp_allocator)
 	lines := strings.split_lines(output, context.temp_allocator)
 	for index := 0; index < len(lines); index += 1 {
 		diagnostic, parsed := parse_diagnostic_line(lines[index])
@@ -110,9 +121,7 @@ parse_compiler_output :: proc(output: string) -> Compiler_Output {
 		}
 		diagnostic.details = details[:]
 		diagnostic.repeated = 1
-		key := fmt.tprintf(
-			"%s:%d:%d:%s", diagnostic.path, diagnostic.line, diagnostic.column, diagnostic.message,
-		)
+		key := diagnostic_key(diagnostic)
 		if previous, found := seen[key]; found {
 			diagnostics[previous].repeated += 1
 			continue

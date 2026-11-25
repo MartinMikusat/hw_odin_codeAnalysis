@@ -23,14 +23,14 @@ print_usage :: proc() {
 	fmt.println(`hw-odin-analyze [--root PATH] [--compact] [--tsv] COMMAND
 
 Workflow commands (text output; the project root is the nearest repository):
-  check [NAME...] [--no-pins] [--max N]
+  check [NAME...] [--no-pins] [--max N] [--full] [--explain]
   edit [--no-check] [--check NAME] < HUNKS
-  show NAME
-  uses NAME            list where a declaration is used
+  show NAME            including PACKAGE.TYPE.FIELD
+  uses NAME            list indexed references by name
   crash [--app NAME] [--report FILE] [--devlog DIRECTORY]
   guard < HOOK.json
   note TEXT            record what the tool did not handle
-  usage report [--days N]
+  usage report [--days N] [--project PATH] [--build BUILD]
 
 Edit hunks are '@@ FILE' (optionally ' count=N') followed by '<<<<',
 old lines, '====', new lines and '>>>>'.
@@ -214,12 +214,28 @@ run_usage_report :: proc(
 	command := arguments[1]
 	if command == "report" {
 		days := 30
-		if len(arguments) == 4 && arguments[2] == "--days" {
-			days = parse_positive_option("--days", arguments[3], 36500)
-		} else if len(arguments) != 2 {
-			fail("usage report accepts only --days N")
+		project := root if root_explicit else ""
+		build := ""
+		for index := 2; index < len(arguments); index += 1 {
+			switch arguments[index] {
+			case "--days":
+				days = parse_positive_option("--days", option_value(arguments, &index), 36500)
+			case "--project":
+				path := option_value(arguments, &index)
+				resolved, path_error := os.get_absolute_path(path, context.temp_allocator)
+				if path_error != nil || path == "" {
+					fail("--project requires a project directory")
+				}
+				project = project_root(resolved, false)
+			case "--build":
+				build = option_value(arguments, &index)
+				if build == "" { fail("--build requires a build ID or current") }
+				if build == "current" { build = BUILD }
+			case:
+				fail(fmt.tprintf("unknown usage report option: %s", arguments[index]))
+			}
 		}
-		text, ok := usage.effectiveness_report(days, root if root_explicit else "")
+		text, ok := usage.effectiveness_report(days, project, build)
 		if !ok {
 			fail("failed to read the usage database")
 		}
@@ -1830,7 +1846,7 @@ main :: proc() {
 	root, root_explicit, compact, tsv, arguments := parse_arguments()
 	defer delete(root)
 
-	if len(arguments) == 0 || arguments[0] == "help" {
+	if len(arguments) == 0 || arguments[0] == "help" || arguments[0] == "-h" || arguments[0] == "--help" {
 		print_usage()
 		return
 	}

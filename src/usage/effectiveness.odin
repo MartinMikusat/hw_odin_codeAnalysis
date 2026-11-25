@@ -60,13 +60,24 @@ event_line :: proc(builder: ^strings.Builder, event: Command_Event) {
 	)
 }
 
-effectiveness_report :: proc(days: int, project: string) -> (text: string, ok: bool) {
-	events := load_command_events(days, project) or_return
+is_follow_up_lookup :: proc(event: Command_Event) -> bool {
+	switch event.command {
+	case "show", "uses", "outline", "search", "package-api", "inspect", "definition", "type-definition",
+	     "references", "callers", "callees", "signature", "diagnostics", "completion", "imports":
+		return true
+	case "shell":
+		return event.reason == "file-read" || event.reason == "text-search" || event.reason == "ols-query"
+	}
+	return false
+}
+
+effectiveness_report :: proc(days: int, project: string, build := "") -> (text: string, ok: bool) {
+	events := load_command_events(days, project, build) or_return
 	slice.reverse(events)
 	builder := strings.builder_make(context.temp_allocator)
 	fmt.sbprintfln(
-		&builder, "hw-odin-analyze effectiveness, last %d days%s%s: %d events",
-		days, project == "" ? "" : " in ", project, len(events),
+		&builder, "hw-odin-analyze effectiveness, last %d days%s%s%s%s: %d events",
+		days, project == "" ? "" : " in ", project, build == "" ? "" : " for build ", build, len(events),
 	)
 	if len(events) == 0 {
 		return strings.to_string(builder), true
@@ -78,10 +89,13 @@ effectiveness_report :: proc(days: int, project: string) -> (text: string, ok: b
 		direct:   int,
 		sessions: [dynamic]string,
 	}
+	Session_Key :: struct {
+		agent, session, project: string,
+	}
 	Loop :: struct {
-		key:     string,
 		started: i64,
 		checks:  int,
+		lookups: int,
 	}
 	agents := make([dynamic]Agent_Use, context.temp_allocator)
 	builds := make([dynamic]Tally, context.temp_allocator)
@@ -93,7 +107,10 @@ effectiveness_report :: proc(days: int, project: string) -> (text: string, ok: b
 	check_durations := make([dynamic]i64, context.temp_allocator)
 	loop_checks := make([dynamic]i64, context.temp_allocator)
 	loop_durations := make([dynamic]i64, context.temp_allocator)
-	open_loops := make([dynamic]Loop, context.temp_allocator)
+	loop_lookups := make([dynamic]i64, context.temp_allocator)
+	open_loops := make(map[Session_Key]Loop, allocator = context.temp_allocator)
+	rejected_edits := make(map[Session_Key]i64, allocator = context.temp_allocator)
+	lookup_free_loops, edit_retries, edit_recoveries: int
 	failures := make([dynamic]Command_Event, context.temp_allocator)
 	notes := make([dynamic]Command_Event, context.temp_allocator)
 	checks, errors, hints, retries, pins, raw_bytes, output_bytes, hunks, redirected, blocked: int
@@ -116,6 +133,13 @@ effectiveness_report :: proc(days: int, project: string) -> (text: string, ok: b
 		}
 		if event.session != "" && !slice.contains(use.sessions[:], event.session) {
 			append(&use.sessions, event.session)
+		}
+		key := Session_Key{event.agent, event.session, event.project}
+		if event.session != "" && is_follow_up_lookup(event) {
+			if loop, found := open_loops[key]; found {
+				loop.lookups += 1
+				open_loops[key] = loop
+			}
 		}
 		switch event.command {
 		case "shell":
@@ -164,26 +188,37 @@ effectiveness_report :: proc(days: int, project: string) -> (text: string, ok: b
 				raw_bytes += event.raw_bytes
 				output_bytes += event.output_bytes
 			}
-			key := fmt.tprintf("%s|%s", event.session, event.project)
-			open := -1
-			for loop, index in open_loops {
-				if loop.key == key {
-					open = index
+			if event.session != "" && (event.outcome == "ok" || event.reason == "compile-errors") {
+				if loop, found := open_loops[key]; found {
+					loop.checks += 1
+					if event.outcome == "ok" {
+						append(&loop_checks, i64(loop.checks))
+						append(&loop_durations, event.started_at_ns + event.duration_ns - loop.started)
+						append(&loop_lookups, i64(loop.lookups))
+						if loop.lookups == 0 { lookup_free_loops += 1 }
+						delete_key(&open_loops, key)
+					} else {
+						open_loops[key] = loop
+					}
+				} else if event.reason == "compile-errors" {
+					open_loops[key] = Loop{started = event.started_at_ns, checks = 1}
 				}
-			}
-			if open >= 0 {
-				open_loops[open].checks += 1
-				if event.outcome == "ok" {
-					append(&loop_checks, i64(open_loops[open].checks))
-					append(&loop_durations, event.started_at_ns + event.duration_ns - open_loops[open].started)
-					unordered_remove(&open_loops, open)
-				}
-			} else if event.outcome == "failed" {
-				append(&open_loops, Loop{key, event.started_at_ns, 1})
 			}
 		case "edit":
 			tally_add(&edit_results, result)
 			hunks += event.hunks
+			if event.session != "" && event.outcome != "unfinished" {
+				if rejected_at, found := rejected_edits[key]; found {
+					delete_key(&rejected_edits, key)
+					if event.started_at_ns - rejected_at <= i64(AFTER_BLOCK_WINDOW) {
+						edit_retries += 1
+						if event.outcome == "ok" { edit_recoveries += 1 }
+					}
+				}
+				if event.outcome == "rejected" {
+					rejected_edits[key] = event.started_at_ns
+				}
+			}
 		case:
 			tally_add(&other_results, fmt.tprintf("%s %s", event.command, result))
 		}
@@ -202,6 +237,7 @@ effectiveness_report :: proc(days: int, project: string) -> (text: string, ok: b
 	slice.sort(check_durations[:])
 	slice.sort(loop_checks[:])
 	slice.sort(loop_durations[:])
+	slice.sort(loop_lookups[:])
 	fmt.sbprintfln(&builder, "\ncheck: %d runs: %s", checks, tally_text(check_results[:]))
 	fmt.sbprintfln(&builder, "  time %s", seconds_text(check_durations[:]))
 	fmt.sbprintfln(
@@ -218,10 +254,18 @@ effectiveness_report :: proc(days: int, project: string) -> (text: string, ok: b
 			len(loop_checks), percentile(loop_checks[:], 50), seconds_text(loop_durations[:]),
 			len(open_loops),
 		)
+		fmt.sbprintfln(
+			&builder, "  follow-up lookups: median %d, p90 %d; %d completed without a recorded lookup",
+			percentile(loop_lookups[:], 50), percentile(loop_lookups[:], 90), lookup_free_loops,
+		)
 	} else {
 		fmt.sbprintfln(&builder, "  failed then passed: 0; %d still failing", len(open_loops))
 	}
 	fmt.sbprintfln(&builder, "edit: %d hunks: %s", hunks, tally_text(edit_results[:]))
+	fmt.sbprintfln(
+		&builder, "  attempts within 10 minutes of a rejection in the same session and project: %d, succeeded %d",
+		edit_retries, edit_recoveries,
+	)
 	fmt.sbprintfln(&builder, "other: %s", tally_text(other_results[:]))
 	fmt.sbprintfln(
 		&builder, "guard: %d blocked (%s); %d followed by check or edit", blocked,

@@ -23,8 +23,8 @@ Scored_Symbol :: struct {
 	score:  int,
 }
 
-query_symbols :: proc(query: Query, root, command, argument: string) -> []analysis.Symbol {
-	payload, ok := query(root, command, argument)
+query_symbols :: proc(query: Query, root, command: string, arguments: ..string) -> []analysis.Symbol {
+	payload, ok := query(root, command, ..arguments)
 	if !ok {
 		return nil
 	}
@@ -184,50 +184,80 @@ declaration_text :: proc(root: string, symbol: analysis.Symbol, limit: int) -> s
 }
 
 named_declarations :: proc(query: Query, root, name: string) -> []analysis.Symbol {
-	package_name := ""
-	wanted := name
-	if dot := strings.last_index_byte(name, '.'); dot >= 0 {
-		package_name = name[:dot]
-		wanted = name[dot + 1:]
-	}
-	result := make([dynamic]analysis.Symbol, context.temp_allocator)
-	for symbol in query_symbols(query, root, "search", wanted) {
-		if symbol.name != wanted || symbol.kind == .Import || symbol.kind == .Package {
-			continue
-		}
-		if package_name != "" && symbol.package_name != package_name &&
-		   !strings.has_suffix(symbol.package_directory, package_name) {
-			continue
-		}
-		append(&result, symbol)
-	}
-	return result[:]
+	return query_symbols(query, root, "declarations", name)
 }
 
-callee_at :: proc(root: string, diagnostic: Compiler_Diagnostic) -> string {
-	text, found := read_text(absolute(root, diagnostic.path))
-	if !found || diagnostic.line <= 0 {
+qualified_name :: proc(symbol: analysis.Symbol) -> string {
+	if symbol.kind == .Field && symbol.owner_type != "" {
+		return fmt.tprintf("%s.%s.%s", symbol.package_name, symbol.owner_type, symbol.name)
+	}
+	return fmt.tprintf("%s.%s", symbol.package_name, symbol.name)
+}
+
+diagnostic_type_at :: proc(query: Query, root: string, diagnostic: Compiler_Diagnostic) -> []analysis.Symbol {
+	payload, ok := query(
+		root, "type-definition", absolute(root, diagnostic.path),
+		fmt.tprint(diagnostic.line), fmt.tprint(diagnostic.column),
+	)
+	if !ok { return nil }
+	location: analysis.Location_Result
+	if json.unmarshal_string(payload, &location, allocator = context.temp_allocator) != nil {
+		return nil
+	}
+	return location.locations
+}
+
+field_hint :: proc(query: Query, root: string, owners: []analysis.Symbol, missing: string) -> string {
+	if len(owners) != 1 || owners[0].kind != .Struct {
 		return ""
 	}
-	lines := strings.split_lines(text, context.temp_allocator)
-	if diagnostic.line > len(lines) {
-		return ""
-	}
-	line := lines[diagnostic.line - 1]
-	start := clamp(diagnostic.column - 1, 0, len(line))
-	end := start
-	for end < len(line) {
-		switch line[end] {
-		case 'a' ..= 'z', 'A' ..= 'Z', '0' ..= '9', '_', '.':
-			end += 1
-			continue
+	owner := owners[0]
+	name := fmt.tprintf("%s.%s.*", owner.package_directory, owner.name)
+	fields := make([dynamic]analysis.Symbol, context.temp_allocator)
+	for field in named_declarations(query, root, name) {
+		if field.path == owner.path &&
+		   field.range.start.offset >= owner.extent.start.offset &&
+		   field.range.start.offset < owner.extent.end.offset {
+			append(&fields, field)
 		}
-		break
 	}
-	if end >= len(line) || line[end] != '(' {
-		return ""
+	base := fmt.tprintf("%s at %s:%d", qualified_name(owner), display_path(root, owner.path), owner.range.start.line)
+	matches := closest(missing, fields[:])
+	if len(matches) == 0 {
+		return base
 	}
-	return line[start:end]
+	match := matches[0].symbol
+	return fmt.tprintf(
+		"%s has field %s: %s (%s:%d)", base, match.name, match.detail,
+		display_path(root, match.path), match.range.start.line,
+	)
+}
+
+diagnostic_expression_declarations :: proc(
+	query: Query, root: string, diagnostic: Compiler_Diagnostic, expression: string,
+) -> []analysis.Symbol {
+	return query_symbols(
+		query, root, "diagnostic-declarations", absolute(root, diagnostic.path),
+		fmt.tprint(diagnostic.line), fmt.tprint(diagnostic.column), expression,
+	)
+}
+
+signature_hint :: proc(root: string, declarations: []analysis.Symbol) -> string {
+	if len(declarations) == 0 { return "" }
+	builder := strings.builder_make(context.temp_allocator)
+	for symbol, index in declarations[:min(len(declarations), SHOWN_SYMBOLS_MAX)] {
+		detail, _ := strings.replace_all(symbol.detail, "\n", " ", context.temp_allocator)
+		fmt.sbprintf(
+			&builder, "%s%s:%d  %s %s",
+			index == 0 ? "declaration: " : "\n          ",
+			display_path(root, symbol.path), symbol.range.start.line,
+			qualified_name(symbol), strings.trim_space(detail),
+		)
+	}
+	if len(declarations) > SHOWN_SYMBOLS_MAX {
+		fmt.sbprintf(&builder, "\n          %d more declarations", len(declarations) - SHOWN_SYMBOLS_MAX)
+	}
+	return strings.to_string(builder)
 }
 
 diagnostic_hint :: proc(query: Query, root: string, diagnostic: Compiler_Diagnostic) -> string {
@@ -242,62 +272,43 @@ diagnostic_hint :: proc(query: Query, root: string, diagnostic: Compiler_Diagnos
 		return similar_member(query, root, diagnostic.path, values[1], last_segment(values[0]))
 	}
 	if strings.contains(message, "has no field") && len(values) >= 3 {
-		type_name := last_segment(strings.trim_left(values[1], "^"))
-		declarations := named_declarations(query, root, type_name)
-		if len(declarations) == 1 {
-			return fmt.tprintf(
-				"%s is declared at %s:%s", type_name, display_path(root, declarations[0].path),
-				declaration_text(root, declarations[0], DECLARATION_LINES_MAX),
-			)
+		owners := diagnostic_type_at(query, root, diagnostic)
+		if len(owners) != 1 {
+			type_name := strings.trim_left(values[1], "^")
+			owners = named_declarations(query, root, type_name)
 		}
-		return ""
+		return field_hint(query, root, owners, values[2])
+	}
+	if strings.has_prefix(message, "Unknown field ") && len(values) > 0 {
+		owners := diagnostic_expression_declarations(query, root, diagnostic, "literal")
+		return field_hint(query, root, owners, values[0])
 	}
 	argument_errors := [?]string{
 		"is missing in procedure call", "Too many arguments", "Too few arguments",
-		"in a procedure argument", "No parameter named",
+		"in a procedure argument", "No parameter named", "Cannot convert",
+		"procedure group", "procedure call",
 	}
 	for marker in argument_errors {
-		if !strings.contains(message, marker) {
-			continue
+		if strings.contains(message, marker) {
+			declarations := diagnostic_expression_declarations(query, root, diagnostic, "call")
+			return signature_hint(root, declarations)
 		}
-		callee := callee_at(root, diagnostic)
-		if callee == "" {
-			return ""
-		}
-		declarations := named_declarations(query, root, last_segment(callee))
-		if len(declarations) == 0 || len(declarations) > SHOWN_SYMBOLS_MAX {
-			return ""
-		}
-		builder := strings.builder_make(context.temp_allocator)
-		for symbol in declarations {
-			detail, _ := strings.replace_all(symbol.detail, "\n", " ", context.temp_allocator)
-			if brace := strings.index_byte(detail, '{'); brace > 0 {
-				detail = detail[:brace]
-			}
-			fmt.sbprintf(
-				&builder, "%s%s:%d  %s", strings.builder_len(builder) > 0 ? "; " : "signature: ",
-				display_path(root, symbol.path), symbol.range.start.line,
-				strings.trim_space(detail),
-			)
-		}
-		return strings.to_string(builder)
 	}
 	return ""
 }
 
 add_hints :: proc(query: Query, report: ^Check_Report) {
 	hinted := 0
-	seen := make(map[string]string, allocator = context.temp_allocator)
+	seen := make(map[Diagnostic_Key]bool, allocator = context.temp_allocator)
 	for &step in report.steps {
 		for &diagnostic in step.output.diagnostics {
 			if diagnostic.warning || hinted >= HINTED_DIAGNOSTICS_MAX {
 				continue
 			}
-			if diagnostic.message in seen {
-				continue
-			}
+			key := diagnostic_key(diagnostic, report.root)
+			if seen[key] { continue }
+			seen[key] = true
 			diagnostic.hint = diagnostic_hint(query, report.root, diagnostic)
-			seen[diagnostic.message] = diagnostic.hint
 			if diagnostic.hint != "" {
 				hinted += 1
 			}
@@ -314,6 +325,9 @@ uses :: proc(query: Query, root, name: string) -> (text: string, found: int, ok:
 	builder := strings.builder_make(context.temp_allocator)
 	files := make(map[string][]string, allocator = context.temp_allocator)
 	shown := 0
+	if len(declarations) > 1 {
+		fmt.sbprintfln(&builder, "%q matches %d declarations", name, len(declarations))
+	}
 	for symbol, index in declarations {
 		if index >= SHOWN_SYMBOLS_MAX {
 			fmt.sbprintfln(
@@ -332,14 +346,14 @@ uses :: proc(query: Query, root, name: string) -> (text: string, found: int, ok:
 		}
 		list := make([dynamic]analysis.Occurrence, context.temp_allocator)
 		for occurrence in occurrences {
-			if occurrence.path == symbol.path && occurrence.range.start.line == symbol.range.start.line {
+			if occurrence.path == symbol.path && occurrence.range.start.offset == symbol.range.start.offset {
 				continue
 			}
 			append(&list, occurrence)
 		}
 		found += len(list)
 		fmt.sbprintfln(
-			&builder, "%s.%s %v %s:%d: %d uses", symbol.package_name, symbol.name, symbol.kind,
+			&builder, "%s %v %s:%d: %d uses", qualified_name(symbol), symbol.kind,
 			display_path(root, symbol.path), symbol.range.start.line, len(list),
 		)
 		for occurrence in list {
@@ -349,7 +363,7 @@ uses :: proc(query: Query, root, name: string) -> (text: string, found: int, ok:
 			shown += 1
 			lines, cached := files[occurrence.path]
 			if !cached {
-				source, _ := read_text(occurrence.path)
+				source, _ := read_text(absolute(root, occurrence.path))
 				lines = strings.split_lines(source, context.temp_allocator)
 				files[occurrence.path] = lines
 			}
@@ -375,6 +389,9 @@ show :: proc(query: Query, root, name: string) -> (text: string, ok: bool) {
 		suggestion := similar_global(query, root, last_segment(name))
 		return fmt.tprintf("show: %q is not declared in the indexed sources. %s", name, suggestion), false
 	}
+	if len(declarations) > 1 {
+		fmt.sbprintfln(&builder, "%q matches %d declarations", name, len(declarations))
+	}
 	for symbol, index in declarations {
 		if index >= SHOWN_SYMBOLS_MAX {
 			fmt.sbprintfln(
@@ -384,7 +401,7 @@ show :: proc(query: Query, root, name: string) -> (text: string, ok: bool) {
 			break
 		}
 		fmt.sbprintfln(
-			&builder, "%s.%s %v %s:%d%s", symbol.package_name, symbol.name, symbol.kind,
+			&builder, "%s %v %s:%d%s", qualified_name(symbol), symbol.kind,
 			display_path(root, symbol.path), symbol.range.start.line,
 			declaration_text(root, symbol, SHOWN_LINES_MAX),
 		)

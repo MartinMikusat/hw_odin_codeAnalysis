@@ -163,9 +163,9 @@ type_definition_for_position :: proc(
 	if !ok {
 		return Location_Result{resolution = .Unresolved}
 	}
-	if is_type_symbol(symbol^) {
+	if type_id := record_type(state, symbol^); int(type_id) >= 0 {
 		values := make([]Symbol, 1, allocator)
-		values[0] = symbol^
+		values[0] = state.symbols[int(type_id)]
 		return Location_Result{resolution = .Exact, locations = values}
 	}
 

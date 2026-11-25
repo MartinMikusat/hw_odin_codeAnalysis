@@ -10,10 +10,13 @@ OTHER_LINES_MAX :: 20
 COMPILER_ERROR_LIMIT :: 36
 
 Check_Options :: struct {
-	root:    string,
-	names:   []string,
-	no_pins: bool,
-	shown:   int,
+	root:           string,
+	hint_directory: string,
+	names:          []string,
+	no_pins:        bool,
+	explain:        bool,
+	full:           bool,
+	shown:          int,
 }
 
 Step_Report :: struct {
@@ -30,6 +33,8 @@ Check_Report :: struct {
 	steps:    []Step_Report,
 	reverted: bool,
 	error:    string,
+	root_hint: string,
+	plan:     bool,
 	passed:   bool,
 }
 
@@ -56,10 +61,14 @@ run_step :: proc(root: string, step: Check_Step) -> Step_Report {
 }
 
 check :: proc(options: Check_Options) -> Check_Report {
-	report := Check_Report{root = options.root}
+	report := Check_Report{root = options.root, plan = options.explain}
 	steps, steps_error := check_steps(options.root)
 	if steps_error != "" {
 		report.error = steps_error
+		if options.hint_directory != "" && options.hint_directory != options.root &&
+		   is_odin_project(options.hint_directory) && !is_odin_project(options.root) {
+			report.root_hint = options.hint_directory
+		}
 		return report
 	}
 	selected := make([dynamic]Check_Step, context.temp_allocator)
@@ -83,13 +92,23 @@ check :: proc(options: Check_Options) -> Check_Report {
 				"unknown check %q; available: %s",
 				name, strings.join(names[:], ", ", context.temp_allocator),
 			)
-			return report
+			clear(&selected)
+			append(&selected, ..steps)
+			break
 		}
+	}
+	results := make([dynamic]Step_Report, context.temp_allocator)
+	if report.plan || report.error != "" {
+		for step in selected {
+			append(&results, Step_Report{step = step})
+		}
+		report.steps = results[:]
+		report.passed = report.error == ""
+		return report
 	}
 	if !options.no_pins {
 		report.pins = advance_pins(options.root)
 	}
-	results := make([dynamic]Step_Report, context.temp_allocator)
 	report.passed = true
 	for step in selected {
 		result := run_step(options.root, step)
@@ -151,10 +170,47 @@ display_path :: proc(root, path: string) -> string {
 	return strings.trim_prefix(path, prefix)
 }
 
-format_check :: proc(report: Check_Report, shown_limit: int) -> string {
+shell_word :: proc(word: string) -> string {
+	if word != "" {
+		simple := true
+		for ch in word {
+			switch ch {
+			case 'a' ..= 'z', 'A' ..= 'Z', '0' ..= '9', '/', '.', '-', '_', ':', '=':
+			case:
+				simple = false
+			}
+		}
+		if simple { return word }
+	}
+	escaped, _ := strings.replace_all(word, "'", "'\\''", context.temp_allocator)
+	return fmt.tprintf("'%s'", escaped)
+}
+
+write_check_step :: proc(builder: ^strings.Builder, step: Check_Step) {
+	source := step.source if step.source != "" else "inferred from the project directory"
+	fmt.sbprintfln(builder, "[%s] configuration: %s", step.name, source)
+	fmt.sbprintf(builder, "[%s] command:", step.name)
+	for word in step.command {
+		fmt.sbprintf(builder, " %s", shell_word(word))
+	}
+	strings.write_byte(builder, '\n')
+}
+
+format_check :: proc(report: Check_Report, shown_limit: int, full := false) -> string {
 	builder := strings.builder_make(context.temp_allocator)
-	if report.error != "" {
-		fmt.sbprintfln(&builder, "check: ERROR %s", report.error)
+	if report.error != "" || report.plan {
+		if report.error != "" {
+			fmt.sbprintfln(&builder, "check: ERROR %s", report.error)
+		} else {
+			fmt.sbprintln(&builder, "check: PLAN")
+		}
+		fmt.sbprintfln(&builder, "project root: %s", report.root)
+		for step in report.steps {
+			write_check_step(&builder, step.step)
+		}
+		if report.root_hint != "" {
+			fmt.sbprintfln(&builder, "check this project with: hw-odin-analyze --root %s check", shell_word(report.root_hint))
+		}
 		return strings.to_string(builder)
 	}
 	fmt.sbprintf(&builder, "check: %s", report.passed ? "PASSED" : "FAILED")
@@ -170,11 +226,24 @@ format_check :: proc(report: Check_Report, shown_limit: int) -> string {
 		)
 	}
 	strings.write_byte(&builder, '\n')
+	if !report.passed {
+		fmt.sbprintfln(&builder, "project root: %s", report.root)
+	}
 	write_pins(&builder, report)
+	repetitions := make(map[Diagnostic_Key]int, allocator = context.temp_allocator)
+	if !full {
+		for step in report.steps {
+			for diagnostic in step.output.diagnostics {
+				repetitions[diagnostic_key(diagnostic, report.root)] += max(1, diagnostic.repeated)
+			}
+		}
+	}
 	shown := 0
 	limit := shown_limit > 0 ? shown_limit : SHOWN_DEFAULT
 	for step in report.steps {
-		if step.step.workspace_gate != "" {
+		if full || !succeeded(step.result) {
+			write_check_step(&builder, step.step)
+		} else if step.step.workspace_gate != "" {
 			fmt.sbprintfln(&builder, "[%s] compile gate: %s", step.step.name, step.step.workspace_gate)
 		}
 		if step.retried {
@@ -186,6 +255,12 @@ format_check :: proc(report: Check_Report, shown_limit: int) -> string {
 				step.step.name,
 			)
 		}
+		if full {
+			if step.result.output != "" {
+				fmt.sbprintfln(&builder, "%s", strings.trim_right_space(step.result.output))
+			}
+			continue
+		}
 		errors := 0
 		for pass in 0 ..< 2 {
 			for diagnostic in step.output.diagnostics {
@@ -193,15 +268,21 @@ format_check :: proc(report: Check_Report, shown_limit: int) -> string {
 					continue
 				}
 				if pass == 0 {errors += 1}
-				if shown >= limit {
+				key := diagnostic_key(diagnostic, report.root)
+				count := repetitions[key]
+				if shown >= limit || count == 0 {
 					continue
 				}
+				repetitions[key] = 0
 				shown += 1
 				fmt.sbprintfln(
 					&builder, "[%s] %s:%d:%d %s: %s", step.step.name,
 					display_path(report.root, diagnostic.path), diagnostic.line, diagnostic.column,
 					diagnostic.warning ? "warning" : "error", diagnostic.message,
 				)
+				if count > 1 {
+					fmt.sbprintfln(&builder, "    reported %d times", count)
+				}
 				for detail in diagnostic.details {
 					fmt.sbprintfln(&builder, "    %s", detail)
 				}
@@ -230,12 +311,8 @@ format_check :: proc(report: Check_Report, shown_limit: int) -> string {
 			}
 		}
 	}
-	total := 0
-	for step in report.steps {
-		total += len(step.output.diagnostics)
-	}
-	if total > shown {
-		fmt.sbprintfln(&builder, "%d more diagnostics are hidden; raise --max to list them", total - shown)
+	if len(repetitions) > shown {
+		fmt.sbprintfln(&builder, "%d more diagnostics are hidden; raise --max or use --full", len(repetitions) - shown)
 	}
 	return strings.to_string(builder)
 }

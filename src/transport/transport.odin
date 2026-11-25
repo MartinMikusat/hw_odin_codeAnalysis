@@ -12,6 +12,7 @@ import "core:time"
 MAX_MESSAGE_SIZE :: 16 * 1024 * 1024
 LOCK_EX          :: c.int(2)
 LOCK_NB          :: c.int(4)
+DAEMON_CACHE_REVISION :: "2:"
 
 foreign import System "system:System"
 
@@ -34,7 +35,8 @@ runtime_paths :: proc(
 	if cache_error != nil {
 		return
 	}
-	root_hash := hash.fnv64a(transmute([]byte)root)
+	cache_identity := strings.concatenate({DAEMON_CACHE_REVISION, root}, context.temp_allocator)
+	root_hash := hash.fnv64a(transmute([]byte)cache_identity)
 	key := fmt.aprintf("%016x", root_hash, allocator = context.temp_allocator)
 	directory, _ := filepath.join(
 		{cache_directory, "hw_odin_codeAnalysis", key},

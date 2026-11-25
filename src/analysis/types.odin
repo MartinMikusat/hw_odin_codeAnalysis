@@ -129,6 +129,7 @@ Occurrence :: struct {
 	is_call:    bool,
 	is_selector: bool,
 	selector_base: string,
+	receiver_offset: int `json:"-"`,
 }
 
 Import :: struct {

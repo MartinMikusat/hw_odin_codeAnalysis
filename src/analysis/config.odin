@@ -118,6 +118,11 @@ load_config :: proc(
 }
 
 workspace_gate :: proc(root: string) -> (gate: string, found: bool) {
+	gate, _, found = workspace_gate_source(root)
+	return
+}
+
+workspace_gate_source :: proc(root: string) -> (gate, source: string, found: bool) {
 	parent := filepath.dir(root)
 	shared, _ := filepath.join({parent, "odin_libraries", "odin-workspace.json"}, context.temp_allocator)
 	beside, _ := filepath.join({parent, "odin-workspace.json"}, context.temp_allocator)
@@ -139,11 +144,11 @@ workspace_gate :: proc(root: string) -> (gate: string, found: bool) {
 		for project in parsed.projects {
 			path, _ := filepath.join({filepath.dir(manifest), project.path}, context.temp_allocator)
 			if path == wanted && project.gate != "" {
-				return project.gate, true
+				return project.gate, manifest, true
 			}
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 add_collection :: proc(

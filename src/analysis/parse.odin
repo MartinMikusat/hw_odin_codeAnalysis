@@ -15,8 +15,9 @@ Collect_State :: struct {
 	top_level:      map[^ast.Node]bool,
 	selector_offsets: map[int]bool,
 	selector_bases: map[int]string,
+	receiver_offsets: map[int]int,
 	call_offsets:   map[int]bool,
-	field_kinds:    map[^ast.Field]Symbol_Kind,
+	parameter_scopes: map[^ast.Field]Source_Range,
 	field_owners:   map[^ast.Field]string,
 	node_stack:     [dynamic]^ast.Node,
 	collect_occurrences: bool,
@@ -647,16 +648,6 @@ add_value_symbols :: proc(collector: ^Collect_State, decl: ^ast.Value_Decl) {
 			#partial switch value in detail_node.derived {
 			case ^ast.Proc_Lit:
 				detail_node = cast(^ast.Node)value.type
-				if value.type.params != nil {
-					for field in value.type.params.list {
-						collector.field_kinds[field] = .Parameter
-					}
-				}
-				if value.type.results != nil {
-					for field in value.type.results.list {
-						collector.field_kinds[field] = .Parameter
-					}
-				}
 			case ^ast.Struct_Type:
 				if value.fields != nil {
 					for field in value.fields.list {
@@ -696,10 +687,9 @@ add_value_symbols :: proc(collector: ^Collect_State, decl: ^ast.Value_Decl) {
 }
 
 add_field_symbols :: proc(collector: ^Collect_State, field: ^ast.Field) {
-	kind := Symbol_Kind.Field
-	if classified_kind, found := collector.field_kinds[field]; found {
-		kind = classified_kind
-	}
+	scope, is_parameter := collector.parameter_scopes[field]
+	kind := Symbol_Kind.Parameter if is_parameter else .Field
+	extent := scope if is_parameter else range_from_node(cast(^ast.Node)field)
 	owner := collector.field_owners[field]
 	for name_expression in field.names {
 		ident, ok := name_expression.derived.(^ast.Ident)
@@ -717,7 +707,7 @@ add_field_symbols :: proc(collector: ^Collect_State, field: ^ast.Field) {
 				package_directory = collector.file.package_directory,
 				owner_type = owner,
 				range = range_from_ident(ident),
-				extent = range_from_node(cast(^ast.Node)field),
+				extent = extent,
 				detail = node_source_text(
 					collector.file,
 					cast(^ast.Node)field.type,
@@ -746,10 +736,33 @@ collect_visit :: proc(visitor: ^ast.Visitor, node: ^ast.Node) -> ^ast.Visitor {
 		add_value_symbols(collector, value)
 	case ^ast.Field:
 		add_field_symbols(collector, value)
+	case ^ast.Proc_Lit:
+		if value.type != nil {
+			scope := range_from_node(node)
+			field_lists := [?]^ast.Field_List{value.type.params, value.type.results}
+			for fields in field_lists {
+				if fields == nil { continue }
+				for field in fields.list { collector.parameter_scopes[field] = scope }
+			}
+		}
 	case ^ast.Selector_Expr:
 		collector.selector_offsets[value.field.pos.offset] = true
 		if base, ok := value.expr.derived.(^ast.Ident); ok {
 			collector.selector_bases[value.field.pos.offset] = base.name
+		}
+		if receiver, ok := expression_symbol_position(value.expr); ok {
+			collector.receiver_offsets[value.field.pos.offset] = receiver.offset + 1
+		}
+	case ^ast.Comp_Lit:
+		if receiver, ok := expression_symbol_position(value.type); ok {
+			for element in value.elems {
+				keyed, is_keyed := element.derived.(^ast.Field_Value)
+				if !is_keyed || keyed.field == nil { continue }
+				if field, is_name := keyed.field.derived.(^ast.Ident); is_name {
+					collector.selector_offsets[field.pos.offset] = true
+					collector.receiver_offsets[field.pos.offset] = receiver.offset + 1
+				}
+			}
 		}
 	case ^ast.Implicit_Selector_Expr:
 		collector.selector_offsets[value.field.pos.offset] = true
@@ -776,6 +789,7 @@ collect_visit :: proc(visitor: ^ast.Visitor, node: ^ast.Node) -> ^ast.Visitor {
 				is_call = collector.call_offsets[value.pos.offset],
 				is_selector = collector.selector_offsets[value.pos.offset],
 				selector_base = collector.selector_bases[value.pos.offset],
+				receiver_offset = collector.receiver_offsets[value.pos.offset],
 			},
 		)
 	}
@@ -873,8 +887,9 @@ collect_file :: proc(
 		top_level = top_level,
 		selector_offsets = make(map[int]bool, context.temp_allocator),
 		selector_bases = make(map[int]string, context.temp_allocator),
+		receiver_offsets = make(map[int]int, context.temp_allocator),
 		call_offsets = make(map[int]bool, context.temp_allocator),
-		field_kinds = make(map[^ast.Field]Symbol_Kind, context.temp_allocator),
+		parameter_scopes = make(map[^ast.Field]Source_Range, context.temp_allocator),
 		field_owners = make(map[^ast.Field]string, context.temp_allocator),
 		node_stack = make([dynamic]^ast.Node, context.temp_allocator),
 		collect_occurrences = collect_occurrences,
