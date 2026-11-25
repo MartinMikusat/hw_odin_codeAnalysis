@@ -110,9 +110,9 @@ crash_reports :: proc() -> []File_Time {
 	return reports[:]
 }
 
-find_report :: proc(options: Crash_Options) -> (path: string, ok: bool) {
+find_report :: proc(options: Crash_Options, session: Journal_Session) -> (path, outside_session: string) {
 	if options.report != "" {
-		return options.report, true
+		return options.report, ""
 	}
 	wanted := normalized_name(options.app)
 	if wanted == "" {
@@ -134,8 +134,20 @@ find_report :: proc(options: Crash_Options) -> (path: string, ok: bool) {
 		if json.unmarshal_string(text[:newline], &header, allocator = context.temp_allocator) != nil {
 			continue
 		}
-		if strings.contains(normalized_name(header.app_name), wanted) {
-			return report.path, true
+		if !strings.contains(normalized_name(header.app_name), wanted) {
+			continue
+		}
+		if session.id == "" {
+			return report.path, ""
+		}
+		capture: struct {captureTime: string}
+		if json.unmarshal_string(text[newline + 1:], &capture, allocator = context.temp_allocator) == nil {
+			if captured_ms, timed := capture_time_ms(capture.captureTime); timed && journal_session_contains(session, captured_ms) {
+				return report.path, ""
+			}
+		}
+		if outside_session == "" {
+			outside_session = report.path
 		}
 	}
 	return
@@ -226,12 +238,11 @@ capture_time_ms :: proc(value: string) -> (milliseconds: i64, ok: bool) {
 	if len(fields) != 3 || len(fields[2]) != 5 || len(fields[1]) < 8 {
 		return
 	}
-	clock := fields[1][:8]
 	stamp := strings.concatenate(
-		{fields[0], "T", clock, fields[2][:3], ":", fields[2][3:]}, context.temp_allocator,
+		{fields[0], "T", fields[1], fields[2][:3], ":", fields[2][3:]}, context.temp_allocator,
 	)
 	parsed, consumed := time.rfc3339_to_time_utc(stamp)
-	if consumed == 0 {
+	if consumed != len(stamp) {
 		return
 	}
 	return time.to_unix_nanoseconds(parsed) / 1_000_000, true
@@ -239,15 +250,24 @@ capture_time_ms :: proc(value: string) -> (milliseconds: i64, ok: bool) {
 
 Journal_Record :: struct {
 	timestampMs: i64,
+	session:     string,
 	kind:        string,
 	severity:    string,
 	outcome:     string,
 	feature:     string,
 	operation:   string,
+	stage:       string,
 	reason:      string,
+	detail:      string,
 	message:     string,
 	source:      string,
 	line:        int,
+}
+
+Journal_Session :: struct {
+	id: string,
+	first_ms, stopped_ms: i64,
+	failures: []Journal_Record,
 }
 
 journal_records :: proc(path: string) -> []Journal_Record {
@@ -265,9 +285,90 @@ journal_records :: proc(path: string) -> []Journal_Record {
 	return records[:]
 }
 
-write_journal :: proc(builder: ^strings.Builder, directory: string, crash_ms: i64) -> (assertion: string) {
+latest_journal_session :: proc(directory: string) -> (session: Journal_Session) {
+	batches := [2][]Journal_Record{
+		journal_records(join(directory, "devlog.jsonl.1")),
+		journal_records(join(directory, "devlog.jsonl")),
+	}
+	for records in batches {
+		for record in records {
+			if record.session != "" && record.timestampMs > 0 {
+				session.id = record.session
+			}
+		}
+	}
+	if session.id == "" {
+		return
+	}
+
+	failures := make([dynamic]Journal_Record, context.temp_allocator)
+	for records in batches {
+		for record in records {
+			if record.session != session.id || record.timestampMs <= 0 {
+				continue
+			}
+			if session.first_ms == 0 || record.timestampMs < session.first_ms {
+				session.first_ms = record.timestampMs
+			}
+			if record.feature == "devlog" && record.operation == "shutdown" && record.outcome == "stopped" {
+				session.stopped_ms = record.timestampMs
+			}
+			if record.severity == "error" || record.severity == "critical" {
+				append(&failures, record)
+			}
+		}
+	}
+	session.failures = failures[max(0, len(failures) - JOURNAL_LINES):]
+	return
+}
+
+journal_session_contains :: proc(session: Journal_Session, timestamp_ms: i64) -> bool {
+	return session.id != "" && timestamp_ms >= session.first_ms &&
+		(session.stopped_ms == 0 || timestamp_ms <= session.stopped_ms)
+}
+
+write_session_failures :: proc(builder: ^strings.Builder, session: Journal_Session) {
+	fmt.sbprintfln(builder, "Latest dev-log session %s", session.id)
+	if len(session.failures) == 0 {
+		fmt.sbprintln(builder, "No errors in the retained operation journal for this session.")
+		return
+	}
+	for record in session.failures {
+		fmt.sbprintf(builder, "  %+.1fs %s %s/%s", f64(record.timestampMs - session.first_ms) / 1000,
+			record.severity, record.feature, record.operation)
+		if record.stage != "" {
+			fmt.sbprintf(builder, " [%s]", record.stage)
+		}
+		fmt.sbprintf(builder, " %s", record.reason)
+		if record.detail != "" {
+			fmt.sbprintf(builder, " (%s)", record.detail)
+		}
+		strings.write_byte(builder, '\n')
+	}
+}
+
+write_session_fatals :: proc(builder: ^strings.Builder, directory: string, session: Journal_Session) {
+	fatals := make([dynamic]Journal_Record, context.temp_allocator)
 	for record in journal_records(join(directory, "fatal.jsonl")) {
-		if abs(record.timestampMs - crash_ms) > FATAL_WINDOW_MS {
+		if journal_session_contains(session, record.timestampMs) {
+			append(&fatals, record)
+		}
+	}
+	for record in fatals[max(0, len(fatals) - JOURNAL_LINES):] {
+		cause := record.message != "" ? record.message : record.reason
+		fmt.sbprintf(builder, "  %+.1fs fatal %s %s", f64(record.timestampMs - session.first_ms) / 1000,
+			record.kind, cause)
+		if record.source != "" {
+			fmt.sbprintf(builder, " (%s:%d)", record.source, record.line)
+		}
+		strings.write_byte(builder, '\n')
+	}
+}
+
+write_journal :: proc(builder: ^strings.Builder, directory: string, crash_ms: i64, session := Journal_Session{}) -> (assertion: string) {
+	for record in journal_records(join(directory, "fatal.jsonl")) {
+		if abs(record.timestampMs - crash_ms) > FATAL_WINDOW_MS ||
+		   (session.id != "" && !journal_session_contains(session, record.timestampMs)) {
 			continue
 		}
 		text := fmt.tprintf(
@@ -281,7 +382,8 @@ write_journal :: proc(builder: ^strings.Builder, directory: string, crash_ms: i6
 	}
 	before := make([dynamic]Journal_Record, context.temp_allocator)
 	for record in journal_records(join(directory, "devlog.jsonl")) {
-		if record.timestampMs <= crash_ms + 1000 && record.timestampMs >= crash_ms - FATAL_WINDOW_MS {
+		if (session.id == "" || session.id == record.session) &&
+		   record.timestampMs <= crash_ms + 1000 && record.timestampMs >= crash_ms - FATAL_WINDOW_MS {
 			append(&before, record)
 		}
 	}
@@ -322,30 +424,50 @@ write_archived_log :: proc(builder: ^strings.Builder, dwarf: string) {
 	}
 }
 
-crash :: proc(options: Crash_Options) -> (text: string, ok: bool) {
-	path, found := find_report(options)
-	if !found {
-		return NO_REPORT, false
+crash :: proc(options: Crash_Options) -> (text: string, ok, has_report: bool) {
+	builder := strings.builder_make(context.temp_allocator)
+	session: Journal_Session
+	if options.devlog != "" && options.report == "" {
+		session = latest_journal_session(options.devlog)
+		if session.id != "" {
+			write_session_failures(&builder, session)
+		}
+	}
+	path, outside_session := find_report(options, session)
+	if path == "" {
+		if session.id == "" {
+			return NO_REPORT, false, false
+		}
+		write_session_fatals(&builder, options.devlog, session)
+		fmt.sbprintln(&builder, "No matching macOS crash report for this session.")
+		if outside_session != "" {
+			fmt.sbprintfln(&builder, "Unmatched macOS report: %s", outside_session)
+		}
+		return strings.to_string(builder), true, false
 	}
 	source, read := read_text(path)
 	if !read {
-		return fmt.tprintf("crash: %s could not be read", path), false
+		return fmt.tprintf("crash: %s could not be read", path), false, false
 	}
 	newline := strings.index_byte(source, '\n')
 	if newline < 0 {
-		return "crash: the report has no body", false
+		return "crash: the report has no body", false, false
 	}
 	header: IPS_Header
 	body: IPS_Body
 	if json.unmarshal_string(source[:newline], &header, allocator = context.temp_allocator) != nil ||
 	   json.unmarshal_string(source[newline + 1:], &body, allocator = context.temp_allocator) != nil {
-		return "crash: the report is not in the expected format", false
+		return "crash: the report is not in the expected format", false, false
 	}
 	if body.faultingThread < 0 || body.faultingThread >= len(body.threads) {
-		return "crash: the report names no faulting thread", false
+		return "crash: the report names no faulting thread", false, false
 	}
 	thread := body.threads[body.faultingThread]
-	builder := strings.builder_make(context.temp_allocator)
+	if session.id != "" {
+		fmt.sbprintln(&builder, "macOS crash report matches this session by app and capture time.")
+	} else if options.devlog != "" && options.report == "" {
+		fmt.sbprintln(&builder, "No dev-log session was found. Showing the newest matching macOS report.")
+	}
 	fmt.sbprintfln(&builder, "report: %s", path)
 	fmt.sbprintfln(
 		&builder, "app: %s at %s | %s %s %s", header.app_name, body.captureTime,
@@ -435,7 +557,7 @@ crash :: proc(options: Crash_Options) -> (text: string, ok: bool) {
 			}
 		}
 		for directory in directories {
-			found_assertion := write_journal(&journal, directory, crash_ms)
+			found_assertion := write_journal(&journal, directory, crash_ms, session)
 			if assertion == "" {
 				assertion = found_assertion
 			}
@@ -453,5 +575,5 @@ crash :: proc(options: Crash_Options) -> (text: string, ok: bool) {
 	}
 	strings.write_string(&builder, strings.to_string(journal))
 	write_archived_log(&builder, dwarf_used)
-	return strings.to_string(builder), true
+	return strings.to_string(builder), true, true
 }

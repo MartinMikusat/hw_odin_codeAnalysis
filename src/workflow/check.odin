@@ -174,6 +174,9 @@ format_check :: proc(report: Check_Report, shown_limit: int) -> string {
 	shown := 0
 	limit := shown_limit > 0 ? shown_limit : SHOWN_DEFAULT
 	for step in report.steps {
+		if step.step.workspace_gate != "" {
+			fmt.sbprintfln(&builder, "[%s] compile gate: %s", step.step.name, step.step.workspace_gate)
+		}
 		if step.retried {
 			fmt.sbprintfln(&builder, "[%s] the compiler crashed and the step was run again", step.step.name)
 		}

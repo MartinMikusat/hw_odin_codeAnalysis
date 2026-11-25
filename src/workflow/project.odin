@@ -12,6 +12,7 @@ Check_Step :: struct {
 	name:           string,
 	command:        []string,
 	forwards_flags: bool,
+	workspace_gate: string `json:"-"`,
 }
 
 Project_Config :: struct {
@@ -106,7 +107,7 @@ check_steps :: proc(root: string) -> (steps: []Check_Step, error: string) {
 	if gate, found := analysis.workspace_gate(root); found {
 		command := make([dynamic]string, context.temp_allocator)
 		append(&command, "/bin/sh", "-c", gate)
-		append(&list, Check_Step{name = "workspace", command = command[:]})
+		append(&list, Check_Step{name = "workspace", command = command[:], workspace_gate = gate})
 		return list[:], ""
 	}
 	if !is_odin_project(root) {

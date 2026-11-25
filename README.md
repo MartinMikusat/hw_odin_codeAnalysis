@@ -108,13 +108,17 @@ nearest directory with `.git` or `code-analysis.json`.
 - `check` first advances each dependency pin whose checkout is clean and descends
   from the pin, in `dependencies.lock` and its companion scripts. It type-checks
   the project, retries a crashed compiler once, adds declaration hints, and
-  restores the pins when a check fails.
+  restores the pins when a check fails. For a shared workspace gate, it prints
+  the configured command so the compile targets are visible.
 - `edit` applies every hunk or none, requires the stated match count on whole
-  lines, and then checks each touched project. It writes source files.
+  lines, and then checks each touched project. A rejected hunk shows the first
+  differing line when it can locate the candidate block.
 - `show` prints declarations by name.
-- `crash` reads the newest macOS crash report of an application, resolves source
-  lines with the debug symbols in the project's build folders when they match
-  that build, and adds the dev-log records.
+- With matching debug symbols, `crash` resolves source lines from a macOS
+  crash report.
+  With `--devlog DIRECTORY`, it shows recent errors from the latest journal
+  session first. It matches a crash report by app and capture time within that
+  session. Use `--report FILE` to inspect a specific report.
 - `guard` reads a shell-command hook event and exits 2 for a piped compiler
   command that hides its status, or for a rewrite script over Odin files that
   asserts no match count.

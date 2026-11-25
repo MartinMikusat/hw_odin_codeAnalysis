@@ -193,21 +193,24 @@ partial_line_hint :: proc(content, wanted: string) -> string {
 miss_hint :: proc(content, wanted: string) -> string {
 	content_lines := strings.split_lines(content, context.temp_allocator)
 	wanted_lines := strings.split_lines(strings.trim_right(wanted, "\n"), context.temp_allocator)
-	if len(wanted_lines) == 0 || len(wanted_lines) > len(content_lines) {
+	if len(wanted_lines) == 0 {
 		return "no similar text was found; read the file again"
 	}
 	found := -1
-	matches := 0
-	for start in 0 ..= len(content_lines) - len(wanted_lines) {
-		same := true
+	matched_lines, matches := 0, 0
+	for _, start in content_lines {
+		prefix := 0
 		for line, index in wanted_lines {
-			if strings.trim_space(content_lines[start + index]) != strings.trim_space(line) {
-				same = false
+			at := start + index
+			if at >= len(content_lines) || strings.trim_space(content_lines[at]) != strings.trim_space(line) {
 				break
 			}
+			prefix += 1
 		}
-		if same {
-			found = start
+		if prefix > matched_lines {
+			found, matched_lines = start, prefix
+		}
+		if prefix == len(wanted_lines) {
 			matches += 1
 		}
 	}
@@ -219,10 +222,20 @@ miss_hint :: proc(content, wanted: string) -> string {
 		}
 		return strings.to_string(builder)
 	}
-	first := strings.trim_space(wanted_lines[0])
-	for line, index in content_lines {
-		if first != "" && strings.trim_space(line) == first {
-			return fmt.tprintf("the first line matches line %d, but the following lines differ", index + 1)
+	if matches > 1 {
+		return fmt.tprintf("found %d blocks with matching text after ignoring whitespace", matches)
+	}
+	if found < 0 || (matched_lines == 1 && strings.trim_space(wanted_lines[0]) == "") {
+		return "no similar text was found; read the file again"
+	}
+	for line, index in wanted_lines {
+		at := found + index
+		if at >= len(content_lines) {
+			return fmt.tprintf("the file ends before line %d\n  expected: %q\n  actual: end of file", at + 1, line)
+		}
+		if content_lines[at] != line {
+			return fmt.tprintf("first difference at line %d\n  expected: %q\n  actual:   %q",
+				at + 1, line, content_lines[at])
 		}
 	}
 	return "no similar text was found; read the file again"

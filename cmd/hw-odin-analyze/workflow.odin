@@ -141,7 +141,11 @@ run_edit :: proc(root: string, explicit: bool, arguments: []string) {
 			fmt.eprintln(error)
 		}
 		tracked.event.outcome, tracked.event.reason = "rejected", report.rejection
-		tracked.event.detail = report.errors[0]
+		first_error := report.errors[0]
+		if newline := strings.index_byte(first_error, '\n'); newline >= 0 {
+			first_error = first_error[:newline]
+		}
+		tracked.event.detail = first_error
 		fail(fmt.tprintf(
 			"%d of %d edits did not apply; nothing was written", len(report.errors), len(edits),
 		))
@@ -217,16 +221,18 @@ run_crash :: proc(root: string, explicit: bool, arguments: []string) {
 			fail("crash options are --app NAME, --report FILE and --devlog DIRECTORY")
 		}
 	}
-	text, found := workflow.crash(options)
-	if !found {
+	text, ok, has_report := workflow.crash(options)
+	if !ok {
 		tracked.event.outcome = text == workflow.NO_REPORT ? "not-found" : "error"
 		tracked.event.detail = text
+	} else if !has_report {
+		tracked.event.reason = "journal-only"
 	} else if strings.contains(text, workflow.SYMBOLS_MATCHED) {
 		tracked.event.reason = "symbolized"
 	} else {
 		tracked.event.reason = "no-symbols"
 	}
-	finish(text, found)
+	finish(text, ok)
 }
 
 run_show :: proc(root: string, explicit: bool, arguments: []string) {
