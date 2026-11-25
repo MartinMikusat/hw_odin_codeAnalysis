@@ -172,7 +172,9 @@ run_note :: proc(root: string, explicit: bool, arguments: []string) {
 
 record_shell_event :: proc(verdict: workflow.Guard_Verdict, command, outcome, reason, detail, directory: string) {
 	event := new_event(command, workflow.find_project_root(directory))
-	if strings.contains(verdict.transcript_path, "/.claude/") {
+	if verdict.agent != "" {
+		event.agent = verdict.agent
+	} else if strings.contains(verdict.transcript_path, "/.claude/") {
 		event.agent = "claude"
 	} else if strings.contains(verdict.transcript_path, "/.codex/") {
 		event.agent = "codex"

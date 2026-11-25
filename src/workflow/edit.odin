@@ -159,6 +159,37 @@ line_of :: proc(content: string, offset: int) -> int {
 	return strings.count(content[:offset], "\n") + 1
 }
 
+partial_line_hint :: proc(content, wanted: string) -> string {
+	text := strings.trim_suffix(wanted, "\n")
+	if text == "" {
+		return ""
+	}
+	offset := strings.index(content, text)
+	if offset < 0 {
+		return ""
+	}
+	end := offset + len(text)
+	first_start := strings.last_index_byte(content[:offset], '\n') + 1
+	last_end := strings.index_byte(content[end:], '\n')
+	last_end = last_end < 0 ? len(content) : end + last_end
+	cut := -1
+	if strings.trim_space(content[first_start:offset]) != "" {
+		cut = offset
+	} else if strings.trim_space(content[end:last_end]) != "" {
+		cut = end
+	}
+	if cut < 0 {
+		return ""
+	}
+	line_start := strings.last_index_byte(content[:cut], '\n') + 1
+	line_end := strings.index_byte(content[cut:], '\n')
+	line_end = line_end < 0 ? len(content) : cut + line_end
+	return fmt.tprintf(
+		"a hunk replaces whole lines, and this one covers only part of line %d; the whole line is:\n%s",
+		line_of(content, cut), content[line_start:line_end],
+	)
+}
+
 miss_hint :: proc(content, wanted: string) -> string {
 	content_lines := strings.split_lines(content, context.temp_allocator)
 	wanted_lines := strings.split_lines(strings.trim_right(wanted, "\n"), context.temp_allocator)
@@ -263,10 +294,17 @@ plan_edits :: proc(base: string, edits: []Edit) -> Edit_Report {
 		}
 		offsets := match_offsets(file.content, edit.old, edit.line_anchored)
 		if len(offsets) != edit.count {
-			reject(&rejection, len(offsets) == 0 ? "no-match" : "count-mismatch")
+			reason := len(offsets) == 0 ? "no-match" : "count-mismatch"
 			detail: string
 			if len(offsets) == 0 {
-				detail = miss_hint(file.content, edit.old)
+				if edit.line_anchored {
+					detail = partial_line_hint(file.content, edit.old)
+				}
+				if detail != "" {
+					reason = "partial-line"
+				} else {
+					detail = miss_hint(file.content, edit.old)
+				}
 			} else {
 				lines := strings.builder_make(context.temp_allocator)
 				for offset, position in offsets {
@@ -277,6 +315,7 @@ plan_edits :: proc(base: string, edits: []Edit) -> Edit_Report {
 				}
 				detail = fmt.tprintf("matches start at lines%s", strings.to_string(lines))
 			}
+			reject(&rejection, reason)
 			append(&errors, fmt.tprintf(
 				"edit %d %s: expected %d match(es), found %d; %s",
 				number + 1, edit.file, edit.count, len(offsets), detail,

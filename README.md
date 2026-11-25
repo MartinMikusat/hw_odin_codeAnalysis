@@ -115,10 +115,21 @@ nearest directory with `.git` or `code-analysis.json`.
 - `crash` reads the newest macOS crash report of an application, resolves source
   lines with the debug symbols in the project's build folders when they match
   that build, and adds the dev-log records.
-- `guard` reads an agent PreToolUse hook event and exits 2 for a piped compiler
+- `guard` reads a shell-command hook event and exits 2 for a piped compiler
   command that hides its status, or for a rewrite script over Odin files that
-  asserts no match count. Claude Code (`~/.claude/settings.json`) and Codex
-  (`~/.codex/hooks.json`) run it before shell commands.
+  asserts no match count.
+
+Four agents run `guard` before shell commands. Claude Code
+(`~/.claude/settings.json`) and Codex (`~/.codex/hooks.json`) call it from their
+`PreToolUse` hooks. pi and OpenCode load the adapters in [`hooks/`](hooks/)
+through links:
+
+```sh
+ln -s "$PWD/hooks/pi-guard.ts" ~/.pi/agent/extensions/hw-odin-guard.ts
+ln -s "$PWD/hooks/opencode-guard.ts" ~/.config/opencode/plugins/hw-odin-guard.ts
+```
+
+An adapter lets the command run when the tool is missing or fails.
 
 `scripts/odin_sessions.py` extracts local agent transcripts into a private SQLite
 database outside the repository, to measure tool use and failures after a process

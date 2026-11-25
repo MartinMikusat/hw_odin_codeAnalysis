@@ -16,11 +16,13 @@ Guard_Input :: struct {
 	cwd:             string,
 	session_id:      string,
 	transcript_path: string,
+	agent:           string,
 }
 
 Guard_Verdict :: struct {
 	block_reason:    string,
 	block_kind:      string,
+	agent:           string,
 	session_id:      string,
 	transcript_path: string,
 	directory:       string,
@@ -344,6 +346,7 @@ guard_hook :: proc(source: string) -> (verdict: Guard_Verdict) {
 	if input.tool_input.command == "" {
 		return
 	}
+	verdict.agent = input.agent
 	verdict.session_id = input.session_id
 	verdict.transcript_path = input.transcript_path
 	verdict.directory = input.cwd
