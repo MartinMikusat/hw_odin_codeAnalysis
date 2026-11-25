@@ -1,5 +1,11 @@
 {
     "$schema": "./schema/code-analysis.schema.json",
+    "check": [
+        {
+            "name": "app",
+            "command": ["hw-odin", "check", "cmd/hw-odin-analyze", "-collection:code_analysis=src", "-strict-style"]
+        }
+    ],
     "collections": [],
     "exclude_paths": [
         ".git",

@@ -8,7 +8,7 @@ import "core:sys/posix"
 
 import "code_analysis:analysis"
 
-VERSION :: "0.5.0"
+VERSION :: "0.6.0"
 
 Request :: struct {
 	version:   int,

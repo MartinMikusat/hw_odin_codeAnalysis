@@ -6,6 +6,29 @@
         "odin_command": {
             "type": "string"
         },
+        "check": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "name",
+                    "command"
+                ],
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "command": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "minItems": 1
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
         "checker_args": {
             "type": "array",
             "items": {

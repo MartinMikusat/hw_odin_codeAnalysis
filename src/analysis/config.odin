@@ -76,6 +76,7 @@ load_config :: proc(
 	data, read_error := read_bounded_file(path, 64 * 1024, context.temp_allocator)
 	if read_error != .None {
 		if !os.exists(path) {
+			load_ols_collections(root, &config, allocator)
 			digest := config_digest(&config, allocator)
 			return config, digest, true
 		}
@@ -114,6 +115,36 @@ load_config :: proc(
 	config.index_odin_collections = parsed.index_odin_collections
 	digest := config_digest(&config, allocator)
 	return config, digest, true
+}
+
+load_ols_collections :: proc(root: string, config: ^Config, allocator := context.allocator) {
+	path, _ := filepath.join({root, "ols.json"}, context.temp_allocator)
+	data, read_error := read_bounded_file(path, 64 * 1024, context.temp_allocator)
+	if read_error != .None {
+		return
+	}
+	parsed: struct {
+		collections: []Collection_Config,
+	}
+	if json.unmarshal(data, &parsed, allocator = context.temp_allocator) != nil {
+		return
+	}
+	collections := make([dynamic]Collection_Config, allocator)
+	for collection in parsed.collections {
+		resolved := collection.path
+		if !filepath.is_abs(resolved) {
+			resolved, _ = filepath.join({root, resolved}, context.temp_allocator)
+		}
+		if collection.name == "" || collection.name == "core" || collection.name == "vendor" ||
+		   !os.is_directory(resolved) {
+			continue
+		}
+		append(&collections, Collection_Config{
+			name = strings.clone(collection.name, allocator),
+			path = strings.clone(collection.path, allocator),
+		})
+	}
+	config.collections = collections[:]
 }
 
 config_destroy :: proc(config: ^Config, allocator := context.allocator) {

@@ -22,17 +22,11 @@ Install the verified binary in `~/.local/bin`:
 ./install.sh
 ```
 
-## Test
-
-```sh
-./test.sh
-```
-
 ## Commands
 
 Run `build/hw-odin-analyze help` for the complete command list.
 
-Analysis commands emit JSON and do not change source files. Source positions use one-based lines and UTF-8 byte columns.
+Query commands emit JSON and do not change source files. Source positions use one-based lines and UTF-8 byte columns.
 
 The `outline`, `search`, and `package-api` commands accept `--tsv`. The flag
 replaces the JSON array with one row per symbol in a tab-separated
@@ -106,11 +100,50 @@ hw-odin-analyze --root /path/to/project usage recent --days 7 --tool audit_primi
 
 `usage recent --include-payloads` returns valid UTF-8 as text and returns other bytes as base64. `HW_ODIN_ANALYZE_USAGE_DB` overrides the database path for tests and development runs. The recorder preserves an existing override directory's permissions and restricts the database, WAL, and shared-memory files to the current user.
 
+### Workflow commands
+
+The workflow commands print compact text for agents. The project root is the
+nearest directory with `.git` or `code-analysis.json`.
+
+- `check` first advances each dependency pin whose checkout is clean and descends
+  from the pin, in `dependencies.lock` and its companion scripts. It runs the
+  project's checks, retries a crashed compiler once, adds declaration hints, and
+  restores the pins when a check fails.
+- `edit` applies every hunk or none, requires the stated match count on whole
+  lines, and then checks each touched project. It writes source files.
+- `show` prints declarations by name.
+- `crash` reads the newest macOS crash report of an application, resolves source
+  lines with the symbols of that exact build, and adds the dev-log records.
+  `crash retain` keeps the symbols of the last five builds of a binary.
+- `perf` profiles with `xctrace` (`profile`), compares repeated `hyperfine` runs
+  with the previous commit's result (`compare`), summarizes a `devlog:trace` file
+  (`trace`), and disassembles one procedure (`asm`).
+- `guard` reads an agent PreToolUse hook event and exits 2 for a piped compiler
+  command that hides its status, or for a rewrite script over Odin files that
+  asserts no match count. Claude Code (`~/.claude/settings.json`) and Codex
+  (`~/.codex/hooks.json`) run it before shell commands.
+
+Retained symbols and comparison results are in
+`~/Library/Application Support/hw_odin_codeAnalysis`.
+
+`scripts/odin_sessions.py` extracts local agent transcripts into a private SQLite
+database outside the repository, to measure tool use and failures after a process
+change.
+
 ### Configuration
 
 Place `code-analysis.json` in the analysis root. The file can set the Odin
-command, checker arguments, collection roots, and excluded paths. See
+command, checker arguments, collection roots, excluded paths, and the `check`
+list. See
 [`schema/code-analysis.schema.json`](schema/code-analysis.schema.json).
+
+```json
+{"check": [{"name": "app", "command": ["hw-odin", "check", "src"]}]}
+```
+
+Each command runs in the project root. Without a list, `check` runs
+`./build.sh check`, else the whole `./build.sh`, else
+`hw-odin check ROOT -no-entry-point` with the collections of `ols.json`.
 
 The running daemon reloads this file before it rebuilds the index. It publishes
 the new configuration and watcher roots only after both are ready. An invalid
