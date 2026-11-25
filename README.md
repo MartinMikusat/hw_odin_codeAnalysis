@@ -115,15 +115,12 @@ nearest directory with `.git` or `code-analysis.json`.
 - `crash` reads the newest macOS crash report of an application, resolves source
   lines with the symbols of that exact build, and adds the dev-log records.
   `crash retain` keeps the symbols of the last five builds of a binary.
-- `perf` profiles with `xctrace` (`profile`), compares repeated `hyperfine` runs
-  with the previous commit's result (`compare`), summarizes a `devlog:trace` file
-  (`trace`), and disassembles one procedure (`asm`).
 - `guard` reads an agent PreToolUse hook event and exits 2 for a piped compiler
   command that hides its status, or for a rewrite script over Odin files that
   asserts no match count. Claude Code (`~/.claude/settings.json`) and Codex
   (`~/.codex/hooks.json`) run it before shell commands.
 
-Retained symbols and comparison results are in
+Retained symbols are in
 `~/Library/Application Support/hw_odin_codeAnalysis`.
 
 `scripts/odin_sessions.py` extracts local agent transcripts into a private SQLite

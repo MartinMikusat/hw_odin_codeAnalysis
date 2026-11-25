@@ -28,10 +28,6 @@ Workflow commands (text output; the project root is the nearest repository):
   show NAME
   crash [--app NAME] [--report FILE] [--devlog DIRECTORY]
   crash retain BINARY DSYM
-  perf profile [--seconds N] [--top N] -- COMMAND...
-  perf compare --name NAME [--runs N] -- COMMAND...
-  perf trace FILE [--top N]
-  perf asm BINARY SYMBOL [--full]
   guard < HOOK.json
 
 Edit hunks are '@@ FILE' (optionally ' count=N') followed by '<<<<',
@@ -89,10 +85,6 @@ parse_arguments :: proc() -> (
 	arguments = make([dynamic]string, context.temp_allocator)
 	for index := 1; index < len(os.args); index += 1 {
 		argument := os.args[index]
-		if argument == "--" {
-			append(&arguments, ..os.args[index:])
-			break
-		}
 		if argument == "--compact" {
 			compact = true
 		} else if argument == "--tsv" {
@@ -1850,9 +1842,6 @@ main :: proc() {
 		return
 	case "crash":
 		run_crash(root, root_explicit, arguments[1:])
-		return
-	case "perf":
-		run_perf(root, root_explicit, arguments[1:])
 		return
 	case "show":
 		run_show(root, root_explicit, arguments[1:])

@@ -53,14 +53,6 @@ option_value :: proc(arguments: []string, index: ^int) -> string {
 	return arguments[index^]
 }
 
-split_command :: proc(arguments: []string) -> (options, command: []string) {
-	separator, found := slice.linear_search(arguments, "--")
-	if !found {
-		return arguments, nil
-	}
-	return arguments[:separator], arguments[separator + 1:]
-}
-
 finish :: proc(text: string, ok: bool) {
 	fmt.println(strings.trim_right_space(text))
 	if !ok {
@@ -208,55 +200,6 @@ run_crash :: proc(root: string, explicit: bool, arguments: []string) {
 		}
 	}
 	finish(workflow.crash(options))
-}
-
-run_perf :: proc(root: string, explicit: bool, arguments: []string) {
-	usage :: "perf requires profile, compare, trace or asm; see help"
-	if len(arguments) == 0 {
-		fail(usage)
-	}
-	options, command := split_command(arguments[1:])
-	positional := make([dynamic]string, context.temp_allocator)
-	name := ""
-	seconds, top, runs := 0, 0, 0
-	full := false
-	for index := 0; index < len(options); index += 1 {
-		switch options[index] {
-		case "--name":
-			name = option_value(options, &index)
-		case "--seconds":
-			seconds = parse_positive_option(
-				"--seconds", option_value(options, &index), workflow.PROFILE_SECONDS_MAX,
-			)
-		case "--top":
-			top = parse_positive_option("--top", option_value(options, &index), 1000)
-		case "--runs":
-			runs = parse_positive_option("--runs", option_value(options, &index), workflow.RUNS_MAX)
-		case "--full":
-			full = true
-		case:
-			append(&positional, options[index])
-		}
-	}
-	project := project_root(root, explicit)
-	switch arguments[0] {
-	case "profile":
-		finish(workflow.profile({root = project, command = command, seconds = seconds, top = top}))
-	case "compare":
-		finish(workflow.compare({root = project, name = name, command = command, runs = runs}))
-	case "trace":
-		if len(positional) != 1 {
-			fail("usage: perf trace FILE [--top N]")
-		}
-		finish(workflow.trace_report(positional[0], top))
-	case "asm":
-		if len(positional) != 2 {
-			fail("usage: perf asm BINARY SYMBOL [--full]")
-		}
-		finish(workflow.disassemble(positional[0], positional[1], full))
-	case:
-		fail(usage)
-	}
 }
 
 run_show :: proc(root: string, explicit: bool, arguments: []string) {
