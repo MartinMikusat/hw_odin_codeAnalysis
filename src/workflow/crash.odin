@@ -10,7 +10,6 @@ import "core:time"
 
 SYMBOL_BUNDLES_MAX :: 512
 SYMBOL_SEARCH_DEPTH :: 6
-RETAINED_PER_BINARY :: 5
 REPORT_SCAN_MAX :: 200
 FRAMES_SHOWN :: 40
 JOURNAL_LINES :: 15
@@ -87,10 +86,6 @@ home_path :: proc(parts: ..string) -> string {
 		path = join(path, part)
 	}
 	return path
-}
-
-symbol_store :: proc() -> string {
-	return home_path("Library/Application Support/hw_odin_codeAnalysis/symbols")
 }
 
 newest_first :: proc(a, b: File_Time) -> bool {
@@ -204,7 +199,6 @@ project_symbols :: proc(root: string) -> map[string]string {
 		}
 	}
 	collect_symbol_bundles(join(root, "build"), 0, &bundles)
-	collect_symbol_bundles(symbol_store(), 0, &bundles)
 	return bundle_uuids(bundles[:])
 }
 
@@ -458,47 +452,4 @@ crash :: proc(options: Crash_Options) -> (text: string, ok: bool) {
 	strings.write_string(&builder, strings.to_string(journal))
 	write_archived_log(&builder, dwarf_used)
 	return strings.to_string(builder), true
-}
-
-retain_symbols :: proc(binary, bundle: string) -> string {
-	if !os.is_directory(bundle) {
-		return "the debug symbol bundle does not exist"
-	}
-	uuids := bundle_uuids({bundle})
-	if len(uuids) == 0 {
-		return "the debug symbol bundle has no UUID"
-	}
-	directory := join(symbol_store(), filepath.base(binary))
-	if os.make_directory_all(directory) != nil && !os.is_directory(directory) {
-		return "the symbol store could not be created"
-	}
-	for uuid in uuids {
-		target := join(directory, strings.concatenate({uuid, ".dSYM"}, context.temp_allocator))
-		if os.is_directory(target) {
-			continue
-		}
-		if !succeeded(run({"cp", "-c", "-R", bundle, target})) {
-			os.remove_all(target)
-			if !succeeded(run({"cp", "-R", bundle, target})) {
-				os.remove_all(target)
-				return "the debug symbols could not be copied"
-			}
-		}
-		_ = run({"touch", target})
-	}
-	entries, read_error := os.read_all_directory_by_path(directory, context.temp_allocator)
-	if read_error != nil {
-		return "the symbol store could not be read"
-	}
-	retained := make([dynamic]File_Time, context.temp_allocator)
-	for entry in entries {
-		if entry.type == .Directory && strings.has_suffix(entry.name, ".dSYM") {
-			append(&retained, File_Time{path = entry.fullpath, time = entry.modification_time})
-		}
-	}
-	slice.sort_by(retained[:], newest_first)
-	for index in RETAINED_PER_BINARY ..< len(retained) {
-		os.remove_all(retained[index].path)
-	}
-	return ""
 }

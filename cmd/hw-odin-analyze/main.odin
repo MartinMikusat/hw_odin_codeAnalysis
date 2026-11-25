@@ -27,7 +27,6 @@ Workflow commands (text output; the project root is the nearest repository):
   edit [--no-check] [--check NAME] < HUNKS
   show NAME
   crash [--app NAME] [--report FILE] [--devlog DIRECTORY]
-  crash retain BINARY DSYM
   guard < HOOK.json
 
 Edit hunks are '@@ FILE' (optionally ' count=N') followed by '<<<<',

@@ -76,7 +76,7 @@ load_config :: proc(
 	data, read_error := read_bounded_file(path, 64 * 1024, context.temp_allocator)
 	if read_error != .None {
 		if !os.exists(path) {
-			load_ols_collections(root, &config, allocator)
+			load_shared_collections(root, &config, allocator)
 			digest := config_digest(&config, allocator)
 			return config, digest, true
 		}
@@ -117,32 +117,84 @@ load_config :: proc(
 	return config, digest, true
 }
 
-load_ols_collections :: proc(root: string, config: ^Config, allocator := context.allocator) {
-	path, _ := filepath.join({root, "ols.json"}, context.temp_allocator)
-	data, read_error := read_bounded_file(path, 64 * 1024, context.temp_allocator)
-	if read_error != .None {
-		return
-	}
-	parsed: struct {
-		collections: []Collection_Config,
-	}
-	if json.unmarshal(data, &parsed, allocator = context.temp_allocator) != nil {
-		return
-	}
-	collections := make([dynamic]Collection_Config, allocator)
-	for collection in parsed.collections {
-		resolved := collection.path
-		if !filepath.is_abs(resolved) {
-			resolved, _ = filepath.join({root, resolved}, context.temp_allocator)
-		}
-		if collection.name == "" || collection.name == "core" || collection.name == "vendor" ||
-		   !os.is_directory(resolved) {
+workspace_gate :: proc(root: string) -> (gate: string, found: bool) {
+	parent := filepath.dir(root)
+	shared, _ := filepath.join({parent, "odin_libraries", "odin-workspace.json"}, context.temp_allocator)
+	beside, _ := filepath.join({parent, "odin-workspace.json"}, context.temp_allocator)
+	wanted, _ := filepath.clean(root, context.temp_allocator)
+	for manifest in ([]string{shared, beside}) {
+		data, read_error := read_bounded_file(manifest, 64 * 1024, context.temp_allocator)
+		if read_error != .None {
 			continue
 		}
-		append(&collections, Collection_Config{
-			name = strings.clone(collection.name, allocator),
-			path = strings.clone(collection.path, allocator),
-		})
+		parsed: struct {
+			projects: []struct {
+				path: string,
+				gate: string,
+			},
+		}
+		if json.unmarshal(data, &parsed, allocator = context.temp_allocator) != nil {
+			continue
+		}
+		for project in parsed.projects {
+			path, _ := filepath.join({filepath.dir(manifest), project.path}, context.temp_allocator)
+			if path == wanted && project.gate != "" {
+				return project.gate, true
+			}
+		}
+	}
+	return "", false
+}
+
+add_collection :: proc(
+	root: string,
+	collections: ^[dynamic]Collection_Config,
+	collection: Collection_Config,
+	allocator := context.allocator,
+) {
+	resolved := collection.path
+	if !filepath.is_abs(resolved) {
+		resolved, _ = filepath.join({root, resolved}, context.temp_allocator)
+	}
+	if collection.name == "" || collection.name == "core" || collection.name == "vendor" ||
+	   !os.is_directory(resolved) {
+		return
+	}
+	for existing in collections {
+		if existing.name == collection.name {
+			return
+		}
+	}
+	append(collections, Collection_Config{
+		name = strings.clone(collection.name, allocator),
+		path = strings.clone(collection.path, allocator),
+	})
+}
+
+load_shared_collections :: proc(root: string, config: ^Config, allocator := context.allocator) {
+	collections := make([dynamic]Collection_Config, allocator)
+	if gate, found := workspace_gate(root); found {
+		remaining := gate
+		for word in strings.split_iterator(&remaining, " ") {
+			flag := strings.trim_prefix(word, "-collection:")
+			equals := strings.index_byte(flag, '=')
+			if len(flag) == len(word) || equals < 0 {
+				continue
+			}
+			value := strings.trim_right(flag[equals + 1:], ";")
+			add_collection(root, &collections, {name = flag[:equals], path = value}, allocator)
+		}
+	}
+	path, _ := filepath.join({root, "ols.json"}, context.temp_allocator)
+	if data, read_error := read_bounded_file(path, 64 * 1024, context.temp_allocator); read_error == .None {
+		parsed: struct {
+			collections: []Collection_Config,
+		}
+		if json.unmarshal(data, &parsed, allocator = context.temp_allocator) == nil {
+			for collection in parsed.collections {
+				add_collection(root, &collections, collection, allocator)
+			}
+		}
 	}
 	config.collections = collections[:]
 }

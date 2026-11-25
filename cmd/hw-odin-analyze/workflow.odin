@@ -177,15 +177,6 @@ run_guard :: proc() {
 }
 
 run_crash :: proc(root: string, explicit: bool, arguments: []string) {
-	if len(arguments) > 0 && arguments[0] == "retain" {
-		if len(arguments) != 3 {
-			fail("usage: crash retain BINARY DSYM")
-		}
-		if retain_error := workflow.retain_symbols(arguments[1], arguments[2]); retain_error != "" {
-			fail(retain_error)
-		}
-		return
-	}
 	options := workflow.Crash_Options{root = project_root(root, explicit)}
 	for index := 0; index < len(arguments); index += 1 {
 		switch arguments[index] {

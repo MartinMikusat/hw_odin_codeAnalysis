@@ -106,22 +106,19 @@ The workflow commands print compact text for agents. The project root is the
 nearest directory with `.git` or `code-analysis.json`.
 
 - `check` first advances each dependency pin whose checkout is clean and descends
-  from the pin, in `dependencies.lock` and its companion scripts. It runs the
-  project's checks, retries a crashed compiler once, adds declaration hints, and
+  from the pin, in `dependencies.lock` and its companion scripts. It type-checks
+  the project, retries a crashed compiler once, adds declaration hints, and
   restores the pins when a check fails.
 - `edit` applies every hunk or none, requires the stated match count on whole
   lines, and then checks each touched project. It writes source files.
 - `show` prints declarations by name.
 - `crash` reads the newest macOS crash report of an application, resolves source
-  lines with the symbols of that exact build, and adds the dev-log records.
-  `crash retain` keeps the symbols of the last five builds of a binary.
+  lines with the debug symbols in the project's build folders when they match
+  that build, and adds the dev-log records.
 - `guard` reads an agent PreToolUse hook event and exits 2 for a piped compiler
   command that hides its status, or for a rewrite script over Odin files that
   asserts no match count. Claude Code (`~/.claude/settings.json`) and Codex
   (`~/.codex/hooks.json`) run it before shell commands.
-
-Retained symbols are in
-`~/Library/Application Support/hw_odin_codeAnalysis`.
 
 `scripts/odin_sessions.py` extracts local agent transcripts into a private SQLite
 database outside the repository, to measure tool use and failures after a process
@@ -138,9 +135,11 @@ list. See
 {"check": [{"name": "app", "command": ["hw-odin", "check", "src"]}]}
 ```
 
-Each command runs in the project root. Without a list, `check` runs
-`./build.sh check`, else the whole `./build.sh`, else
-`hw-odin check ROOT -no-entry-point` with the collections of `ols.json`.
+Each command runs in the project root. Without a list, `check` runs the project's
+gate in the shared `odin_libraries/odin-workspace.json`, else
+`hw-odin check ROOT -no-entry-point` with the collections of `ols.json`. Without
+`code-analysis.json`, the index takes its collections from that gate and from
+`ols.json`.
 
 The running daemon reloads this file before it rebuilds the index. It publishes
 the new configuration and watcher roots only after both are ready. An invalid

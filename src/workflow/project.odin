@@ -5,6 +5,8 @@ import "core:os"
 import "core:path/filepath"
 import "core:strings"
 
+import "code_analysis:analysis"
+
 Check_Step :: struct {
 	name:           string,
 	command:        []string,
@@ -97,15 +99,10 @@ check_steps :: proc(root: string) -> (steps: []Check_Step, error: string) {
 		}
 	}
 	list := make([dynamic]Check_Step, context.temp_allocator)
-	if script, found := read_text(join(root, "build.sh")); found {
+	if gate, found := analysis.workspace_gate(root); found {
 		command := make([dynamic]string, context.temp_allocator)
-		append(&command, "./build.sh")
-		name := "build"
-		if strings.contains(script, "check)") {
-			append(&command, "check")
-			name = "check"
-		}
-		append(&list, Check_Step{name = name, command = command[:]})
+		append(&command, "/bin/sh", "-c", gate)
+		append(&list, Check_Step{name = "workspace", command = command[:]})
 		return list[:], ""
 	}
 	if !is_odin_project(root) {
