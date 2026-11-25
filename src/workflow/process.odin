@@ -1,6 +1,8 @@
 package workflow
 
 import "core:os"
+import "core:path/filepath"
+import "core:slice"
 import "core:strings"
 import "core:time"
 
@@ -29,8 +31,13 @@ run :: proc(command: []string, working_dir := "", timeout := 10 * time.Minute) -
 		os.remove(path)
 	}
 	started_at := time.tick_now()
+	arguments := slice.clone(command, context.temp_allocator)
+	relative := strings.contains_rune(command[0], '/') && !filepath.is_abs(command[0])
+	if working_dir != "" && relative {
+		arguments[0] = join(working_dir, command[0])
+	}
 	process, start_error := os.process_start({
-		command = command,
+		command = arguments,
 		working_dir = working_dir,
 		stdout = file,
 		stderr = file,
