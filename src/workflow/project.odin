@@ -1,6 +1,7 @@
 package workflow
 
 import "core:encoding/json"
+import "core:fmt"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
@@ -79,6 +80,9 @@ is_odin_project :: proc(directory: string) -> bool {
 			return true
 		}
 	}
+	if _, registered := analysis.workspace_gate(directory); registered {
+		return true
+	}
 	return directory_has_odin(directory) || directory_has_odin(join(directory, "src"))
 }
 
@@ -106,7 +110,11 @@ check_steps :: proc(root: string) -> (steps: []Check_Step, error: string) {
 		return list[:], ""
 	}
 	if !is_odin_project(root) {
-		return nil, "no Odin project was found; pass --root"
+		return nil, fmt.tprintf(
+			"no check is registered for %s and it has no Odin code at its root or in src/. " +
+			"Add a compile-only gate for it to odin_libraries/odin-workspace.json, " +
+			"or pass --root for another project", root,
+		)
 	}
 	command := make([dynamic]string, context.temp_allocator)
 	append(&command, "hw-odin", "check", root, "-no-entry-point")

@@ -181,7 +181,8 @@ Each command runs in the project root. Without a list, `check` runs the project'
 gate in the shared `odin_libraries/odin-workspace.json`, else
 `hw-odin check ROOT -no-entry-point` with the collections of `ols.json`. Without
 `code-analysis.json`, the index takes its collections from that gate and from
-`ols.json`.
+`ols.json`. A registered gate also marks a project as an Odin project, which a
+repository with code only in subfolders needs.
 
 The running daemon reloads this file before it rebuilds the index. It publishes
 the new configuration and watcher roots only after both are ready. An invalid
