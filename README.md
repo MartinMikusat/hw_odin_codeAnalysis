@@ -130,7 +130,8 @@ nearest directory with `.git` or `code-analysis.json`.
   session. Use `--report FILE` to inspect a specific report.
 - `guard` reads a shell-command hook event and exits 2 for a piped compiler
   command that hides its status, or for a rewrite script over Odin files that
-  asserts no match count.
+  asserts no match count. `hw-odin-analyze check` may be piped, because its
+  output states the verdict and lists the errors compactly.
 
 Five agents run `guard` before shell commands. Claude Code
 (`~/.claude/settings.json`), Codex (`~/.codex/hooks.json`) and Antigravity

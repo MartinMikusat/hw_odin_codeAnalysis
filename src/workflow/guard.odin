@@ -47,7 +47,7 @@ Shell_Pipeline :: []Shell_Stage
 PIPED_COMPILE_REASON ::
 	"Blocked, and no part of the command ran, including any edits in it: piping a compiler or build command hides its exit status and cuts errors off. " +
 	"Run `hw-odin-analyze check [--root PROJECT] [NAME...]`, which returns the real status and every " +
-	"error compactly. For a mode it does not cover, run the command without a pipe, or add `set -o pipefail`."
+	"error compactly; it may be piped. For a mode it does not cover, run the command without a pipe, or add `set -o pipefail`."
 
 SCRIPTED_EDIT_REASON ::
 	"Blocked, and no part of the command ran: this scripted rewrite of Odin source can silently match nothing. Use " +
@@ -252,7 +252,7 @@ compiles :: proc(words: []string, directory: string) -> bool {
 		return false
 	case "hw-odin-analyze":
 		for argument in arguments {
-			if argument == "check" || argument == "edit" {
+			if argument == "edit" {
 				return true
 			}
 		}
