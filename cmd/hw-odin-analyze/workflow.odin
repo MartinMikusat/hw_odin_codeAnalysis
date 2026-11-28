@@ -221,7 +221,7 @@ run_guard :: proc() {
 			decision: string `json:"decision,omitempty"`,
 			reason:   string `json:"reason,omitempty"`,
 		}
-		answer := Decision{}
+		answer := Decision{decision = "allow"}
 		if verdict.block_reason != "" {
 			answer = {"deny", verdict.block_reason}
 		}

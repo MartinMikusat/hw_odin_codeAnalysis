@@ -137,8 +137,7 @@ Five agents run `guard` before shell commands. Claude Code
 (`~/.claude/settings.json`), Codex (`~/.codex/hooks.json`) and Antigravity
 (`~/.gemini/config/hooks.json`, matcher `run_command`) call it from their
 `PreToolUse` hooks. For Antigravity's payload, `guard` answers with a JSON
-decision on standard output: `deny` with a reason, or `{}` to leave the decision
-to Antigravity. pi and OpenCode load the adapters in [`hooks/`](hooks/) through
+decision on standard output: `deny` with a reason, or `allow` when permitted. pi and OpenCode load the adapters in [`hooks/`](hooks/) through
 links:
 
 ```sh
