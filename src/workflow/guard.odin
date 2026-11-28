@@ -45,12 +45,12 @@ Shell_Stage :: struct {
 Shell_Pipeline :: []Shell_Stage
 
 PIPED_COMPILE_REASON ::
-	"Blocked: piping a compiler or build command hides its exit status and cuts errors off. " +
+	"Blocked, and no part of the command ran, including any edits in it: piping a compiler or build command hides its exit status and cuts errors off. " +
 	"Run `hw-odin-analyze check [--root PROJECT] [NAME...]`, which returns the real status and every " +
 	"error compactly. For a mode it does not cover, run the command without a pipe, or add `set -o pipefail`."
 
 SCRIPTED_EDIT_REASON ::
-	"Blocked: this scripted rewrite of Odin source can silently match nothing. Use " +
+	"Blocked, and no part of the command ran: this scripted rewrite of Odin source can silently match nothing. Use " +
 	"`hw-odin-analyze edit <<'EOF'` with `@@ FILE`, `<<<<`, old lines, `====`, new lines, `>>>>`; " +
 	"each hunk must match exactly once (or `count=N`) and the check runs afterwards. " +
 	"A script is allowed when it asserts every match count."
